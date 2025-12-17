@@ -37,6 +37,8 @@ def render_mesh(
     view_axis: str = "+z",
     wireframe_thickness: float = 0.0,
     up_vector_override: tuple[float, float, float] | None = None,
+    orbital_eye: tuple[float, float, float] | None = None,
+    orbital_target: tuple[float, float, float] | None = None,
 ) -> tuple[bytes, tuple[float, float, float]]:
     """Render a mesh to a PNG image.
 
@@ -50,6 +52,9 @@ def render_mesh(
         height: Image height in pixels
         view_axis: Camera view axis ('+x', '-x', '+y', '-y', '+z', '-z')
         wireframe_thickness: Thickness of wireframe lines. 0.0 means disabled.
+        up_vector_override: Optional up vector for camera orientation
+        orbital_eye: Optional camera eye position for orbital mode
+        orbital_target: Optional camera target position for orbital mode
 
     Returns:
         Tuple of (PNG image data as bytes, camera position as (x, y, z))
@@ -123,14 +128,27 @@ def render_mesh(
     fov_radians = np.radians(camera_cfg["fov_degrees"])
     camera = pyrender.PerspectiveCamera(yfov=fov_radians, aspectRatio=aspect_ratio)
     camera_node = scene.add(camera)
-    camera_pose = _calculate_camera_pose(
-        mesh,
-        aspect_ratio,
-        view_axis=view_axis,
-        yfov=camera.yfov,
-        distance_padding=camera_cfg["distance_padding"],
-        up_vector_override=up_vector_override,
-    )
+
+    # Use orbital camera if eye and target are provided
+    if orbital_eye is not None and orbital_target is not None:
+        # Use provided up vector or fallback
+        if up_vector_override is None:
+            up = np.array([0.0, 0.0, 1.0])
+        else:
+            up = np.array(up_vector_override, dtype=float)
+        camera_pose = _look_at_pose(
+            eye=np.array(orbital_eye), target=np.array(orbital_target), up=up
+        )
+    else:
+        # Use axis-based camera positioning
+        camera_pose = _calculate_camera_pose(
+            mesh,
+            aspect_ratio,
+            view_axis=view_axis,
+            yfov=camera.yfov,
+            distance_padding=camera_cfg["distance_padding"],
+            up_vector_override=up_vector_override,
+        )
     scene.set_pose(camera_node, camera_pose)
 
     # Implement Raymond 3-point lighting system from config

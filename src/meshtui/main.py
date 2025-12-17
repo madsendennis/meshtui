@@ -1,5 +1,6 @@
 """Main entry point for meshtui CLI."""
 
+import math
 import signal
 import sys
 import termios
@@ -22,6 +23,7 @@ from meshtui.renderer import render_mesh
 # Load configuration defaults
 _VIEW_CONFIG = config.get_view_config()
 _WIREFRAME_CONFIG = config.get_wireframe_config()
+_ORBITAL_CONFIG = config.get_orbital_camera_config()
 
 # Global state for handling terminal resize
 _current_mesh: trimesh.Trimesh | None = None
@@ -41,6 +43,14 @@ _UP_VECTORS: list[tuple[float, float, float]] = [tuple(v) for v in _VIEW_CONFIG[
 # Camera position tracking
 _camera_position: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
+# Orbital camera state (spherical coordinates)
+_orbital_active = False
+_orbital_theta: float = _ORBITAL_CONFIG["initial_theta"]  # Horizontal angle (azimuth)
+_orbital_phi: float = _ORBITAL_CONFIG["initial_phi"]  # Vertical angle (elevation)
+_orbital_radius: float = 1.0  # Distance from target (will be initialized from AABB)
+_orbital_target: tuple[float, float, float] = (0.0, 0.0, 0.0)  # Mesh center (AABB center)
+_orbital_initial_radius: float = 1.0  # Store initial radius for reset
+
 
 def _effective_up_vector(
     view_axis: str, up_override: tuple[float, float, float] | None
@@ -58,13 +68,71 @@ def _format_vec3(v: tuple[float, float, float]) -> str:
     return f"({x},{y},{z})"
 
 
+def _spherical_to_cartesian(
+    theta: float, phi: float, radius: float, target: tuple[float, float, float]
+) -> tuple[float, float, float]:
+    """Convert spherical coordinates to Cartesian camera position.
+
+    Args:
+        theta: Horizontal angle (azimuth) in radians
+        phi: Vertical angle (elevation) in radians
+        radius: Distance from target
+        target: The center point (x, y, z) to orbit around
+
+    Returns:
+        Camera position (x, y, z) in Cartesian coordinates
+    """
+    import math
+
+    target_x, target_y, target_z = target
+
+    # Spherical to Cartesian conversion
+    x = target_x + radius * math.sin(phi) * math.cos(theta)
+    y = target_y + radius * math.cos(phi)
+    z = target_z + radius * math.sin(phi) * math.sin(theta)
+
+    return (x, y, z)
+
+
+def _initialize_orbital_camera(mesh: trimesh.Trimesh) -> None:
+    """Initialize orbital camera from mesh AABB.
+
+    Sets the target to the mesh center and calculates initial radius.
+    """
+    global _orbital_target, _orbital_radius, _orbital_initial_radius
+
+    import numpy as np
+
+    # Calculate AABB center
+    bounds = mesh.bounds
+    aabb_min = bounds[0]
+    aabb_max = bounds[1]
+    center = (aabb_min + aabb_max) / 2.0
+    _orbital_target = tuple(center)
+
+    # Calculate initial radius based on mesh size (same as renderer does)
+    extents = aabb_max - aabb_min
+    max_extent = float(np.max(extents))
+    camera_cfg = config.get_camera_config()
+    fov_radians = np.radians(camera_cfg["fov_degrees"])
+    tan_half_fov = float(np.tan(fov_radians / 2.0))
+    if not np.isfinite(tan_half_fov) or tan_half_fov <= 0.0:
+        tan_half_fov = 1e-6
+    distance = (max_extent / tan_half_fov) * camera_cfg["distance_padding"]
+    if not np.isfinite(distance) or distance <= 0.0:
+        distance = 1.0
+
+    _orbital_radius = distance
+    _orbital_initial_radius = distance
+
+
 def handle_resize(signum: int, frame: Any) -> None:
     """Signal handler for terminal resize events."""
     global _resize_pending
     _resize_pending = True
 
 
-def draw_interface(cols: int, rows: int) -> None:
+def draw_interface(cols: int, rows: int, mesh: trimesh.Trimesh | None = None) -> None:
     """Draw the TUI interface with border and footer."""
     # Top border
     print(f"\033[1;1H┌{'─' * (cols - 2)}┐", end="")
@@ -79,10 +147,24 @@ def draw_interface(cols: int, rows: int) -> None:
     # Footer
     up_text = _format_vec3(_effective_up_vector(_view_axis, _up_vector_override))
     cam_text = _format_vec3(_camera_position)
-    footer_text = f" q: Quit | ?: Help | u/U: Up {up_text} | Cam {cam_text}"
-    # Pad footer with spaces to clear line
-    padding = " " * max(0, cols - len(footer_text))
-    print(f"\033[{rows};1H{footer_text}{padding}", end="")
+    left_text = f" q: Quit | ?: Help | u/U: Up {up_text} | Cam {cam_text}"
+
+    right_text = ""
+    if mesh is not None:
+        v_count = len(mesh.vertices)
+        f_count = len(mesh.faces)
+        right_text = f"V: {v_count} | F: {f_count} "
+
+    # Calculate spacing
+    available_space = cols - len(left_text) - len(right_text)
+    if available_space < 0:
+        # If not enough space, truncate left text to fit right text
+        # (Scene info is important)
+        left_text = left_text[: max(0, cols - len(right_text) - 1)] + "…"
+        available_space = 0
+
+    footer_text = left_text + " " * available_space + right_text
+    print(f"\033[{rows};1H{footer_text}", end="")
 
     # Flush
     sys.stdout.flush()
@@ -92,12 +174,6 @@ def draw_help_menu(cols: int, rows: int) -> None:
     """Draw the help menu overlay."""
     if not _show_help:
         return
-
-    # Calculate menu dimensions (larger size)
-    menu_width = 60
-    menu_height = 16
-    start_col = (cols - menu_width) // 2
-    start_row = (rows - menu_height) // 2
 
     # Get background color
     bg_ansi = get_terminal_bg_ansi()
@@ -113,14 +189,25 @@ def draw_help_menu(cols: int, rows: int) -> None:
         "  y/Y : View from +/- Y axis",
         "  z/Z : View from +/- Z axis",
         f"  u/U : Cycle camera Up vector (current {up_text})",
+        "",
+        "Orbital Camera (vim-style):",
+        "  h/l : Orbit Left/Right",
+        "  j/k : Orbit Down/Up",
+        "  H/L/J/K : Fast orbit (5x speed)",
+        "  r/R : Zoom In/Out",
+        "  0   : Reset camera to default view",
+        "",
         "  G   : Grid ON (wireframe)",
         "  g   : Grid OFF (solid)",
         "  ?   : Toggle this help menu",
-        "  Esc : Close help menu",
         "  q   : Quit",
-        "",
-        "Press Esc or ? to close",
     ]
+
+    # Calculate menu dimensions
+    menu_width = 60
+    menu_height = len(lines) + 2  # +2 for borders
+    start_col = (cols - menu_width) // 2
+    start_row = (rows - menu_height) // 2
 
     # Draw each row of the menu with solid background
     for i in range(menu_height):
@@ -184,7 +271,7 @@ def render_and_display(
         print("\033[2J", end="", flush=True)
 
     # Draw interface (border and footer)
-    draw_interface(cols, rows)
+    draw_interface(cols, rows, mesh)
 
     # Calculate inner dimensions for the mesh
     # Subtract 2 for side borders
@@ -204,19 +291,40 @@ def render_and_display(
             "axis": _view_axis,
             "wireframe": _wireframe_thickness,
             "up": _up_vector_override,
+            "orbital_active": _orbital_active,
+            "orbital_theta": _orbital_theta,
+            "orbital_phi": _orbital_phi,
+            "orbital_radius": _orbital_radius,
         }
 
         if current_params != _last_render_params or _last_image_data is None:
             # Always pass effective up vector (config default or user-cycled)
             effective_up = _effective_up_vector(_view_axis, _up_vector_override)
-            image_data, cam_pos = render_mesh(
-                mesh,
-                inner_width_px,
-                inner_height_px,
-                view_axis=_view_axis,
-                wireframe_thickness=_wireframe_thickness,
-                up_vector_override=effective_up,
-            )
+
+            # Use orbital camera if active
+            if _orbital_active:
+                eye = _spherical_to_cartesian(
+                    _orbital_theta, _orbital_phi, _orbital_radius, _orbital_target
+                )
+                image_data, cam_pos = render_mesh(
+                    mesh,
+                    inner_width_px,
+                    inner_height_px,
+                    view_axis=_view_axis,
+                    wireframe_thickness=_wireframe_thickness,
+                    up_vector_override=effective_up,
+                    orbital_eye=eye,
+                    orbital_target=_orbital_target,
+                )
+            else:
+                image_data, cam_pos = render_mesh(
+                    mesh,
+                    inner_width_px,
+                    inner_height_px,
+                    view_axis=_view_axis,
+                    wireframe_thickness=_wireframe_thickness,
+                    up_vector_override=effective_up,
+                )
             _last_image_data = image_data
             _camera_position = cam_pos
             _last_render_params = current_params
@@ -252,6 +360,10 @@ def wait_for_exit() -> None:
     - q: Quit
     - x/X, y/Y, z/Z: Change view axis
     - g: Toggle grid/wireframe
+    - h/j/k/l: Orbital camera (vim-style)
+    - H/J/K/L: Fast orbital camera
+    - r/R: Zoom in/out
+    - 0: Reset orbital camera
     - ?: Toggle help
     - Resize events
     """
@@ -261,6 +373,10 @@ def wait_for_exit() -> None:
     global _up_vector_override
     global _view_axis
     global _wireframe_thickness
+    global _orbital_active
+    global _orbital_theta
+    global _orbital_phi
+    global _orbital_radius
 
     if not sys.stdin.isatty():
         return
@@ -288,21 +404,39 @@ def wait_for_exit() -> None:
                         break
                     elif char == "x":
                         _view_axis = "+x"
+                        # Update orbital camera to match +X view
+                        _orbital_theta = 0.0
+                        _orbital_phi = math.pi / 2.0
                         needs_rerender = True
                     elif char == "X":
                         _view_axis = "-x"
+                        # Update orbital camera to match -X view
+                        _orbital_theta = math.pi
+                        _orbital_phi = math.pi / 2.0
                         needs_rerender = True
                     elif char == "y":
                         _view_axis = "+y"
+                        # Update orbital camera to match +Y view (top view)
+                        _orbital_theta = 0.0
+                        _orbital_phi = 0.1  # Clamped to avoid gimbal lock
                         needs_rerender = True
                     elif char == "Y":
                         _view_axis = "-y"
+                        # Update orbital camera to match -Y view (bottom view)
+                        _orbital_theta = 0.0
+                        _orbital_phi = math.pi - 0.1  # Clamped to avoid gimbal lock
                         needs_rerender = True
                     elif char == "z":
                         _view_axis = "+z"
+                        # Update orbital camera to match +Z view
+                        _orbital_theta = math.pi / 2.0
+                        _orbital_phi = math.pi / 2.0
                         needs_rerender = True
                     elif char == "Z":
                         _view_axis = "-z"
+                        # Update orbital camera to match -Z view
+                        _orbital_theta = -math.pi / 2.0
+                        _orbital_phi = math.pi / 2.0
                         needs_rerender = True
                     elif char == "G":
                         if _wireframe_thickness == 0.0:
@@ -332,6 +466,76 @@ def wait_for_exit() -> None:
                         needs_rerender = True
                     elif char == "\x1b" and _show_help:  # Esc
                         _show_help = False
+                        needs_rerender = True
+                    # Orbital camera controls
+                    elif char == "h":  # Orbit left (decrease theta)
+                        _orbital_active = True
+                        _orbital_theta -= _ORBITAL_CONFIG["movement_speed"]
+                        needs_rerender = True
+                    elif char == "l":  # Orbit right (increase theta)
+                        _orbital_active = True
+                        _orbital_theta += _ORBITAL_CONFIG["movement_speed"]
+                        needs_rerender = True
+                    elif char == "j":  # Orbit down (increase phi)
+                        _orbital_active = True
+                        _orbital_phi += _ORBITAL_CONFIG["movement_speed"]
+                        # Clamp phi to avoid gimbal lock
+                        _orbital_phi = max(0.1, min(math.pi - 0.1, _orbital_phi))
+                        needs_rerender = True
+                    elif char == "k":  # Orbit up (decrease phi)
+                        _orbital_active = True
+                        _orbital_phi -= _ORBITAL_CONFIG["movement_speed"]
+                        # Clamp phi to avoid gimbal lock
+                        _orbital_phi = max(0.1, min(math.pi - 0.1, _orbital_phi))
+                        needs_rerender = True
+                    elif char == "H":  # Orbit left fast
+                        _orbital_active = True
+                        _orbital_theta -= (
+                            _ORBITAL_CONFIG["movement_speed"]
+                            * _ORBITAL_CONFIG["movement_speed_fast_multiplier"]
+                        )
+                        needs_rerender = True
+                    elif char == "L":  # Orbit right fast
+                        _orbital_active = True
+                        _orbital_theta += (
+                            _ORBITAL_CONFIG["movement_speed"]
+                            * _ORBITAL_CONFIG["movement_speed_fast_multiplier"]
+                        )
+                        needs_rerender = True
+                    elif char == "J":  # Orbit down fast
+                        _orbital_active = True
+                        _orbital_phi += (
+                            _ORBITAL_CONFIG["movement_speed"]
+                            * _ORBITAL_CONFIG["movement_speed_fast_multiplier"]
+                        )
+                        # Clamp phi to avoid gimbal lock
+                        _orbital_phi = max(0.1, min(math.pi - 0.1, _orbital_phi))
+                        needs_rerender = True
+                    elif char == "K":  # Orbit up fast
+                        _orbital_active = True
+                        _orbital_phi -= (
+                            _ORBITAL_CONFIG["movement_speed"]
+                            * _ORBITAL_CONFIG["movement_speed_fast_multiplier"]
+                        )
+                        # Clamp phi to avoid gimbal lock
+                        _orbital_phi = max(0.1, min(math.pi - 0.1, _orbital_phi))
+                        needs_rerender = True
+                    elif char == "r":  # Zoom in
+                        _orbital_active = True
+                        _orbital_radius *= _ORBITAL_CONFIG["zoom_in_factor"]
+                        needs_rerender = True
+                    elif char == "R":  # Zoom out
+                        _orbital_active = True
+                        _orbital_radius *= _ORBITAL_CONFIG["zoom_out_factor"]
+                        needs_rerender = True
+                    elif char == "0":  # Reset orbital camera
+                        _orbital_active = False
+                        _orbital_theta = _ORBITAL_CONFIG["initial_theta"]
+                        _orbital_phi = _ORBITAL_CONFIG["initial_phi"]
+                        _orbital_radius = _orbital_initial_radius
+                        # Re-initialize target from current mesh
+                        if _current_mesh is not None:
+                            _initialize_orbital_camera(_current_mesh)
                         needs_rerender = True
 
                     if needs_rerender and _current_mesh is not None:
@@ -392,6 +596,8 @@ def main() -> int:
         try:
             mesh = load_mesh(mesh_path)
             _current_mesh = mesh  # Store for resize handling
+            # Initialize orbital camera from mesh
+            _initialize_orbital_camera(mesh)
         except FileNotFoundError:
             print(f"Error: File not found: {mesh_path}", file=sys.stderr)
             return 1

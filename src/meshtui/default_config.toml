@@ -6,6 +6,15 @@
 fov_degrees = 60.0                     # Field of view in degrees (vertical)
 distance_padding = 1.0                 # Multiplier for auto-calculated distance (larger = farther)
 
+[orbital_camera]
+# Orbital camera controls (vim-style)
+movement_speed = 0.1                   # Base rotation speed in radians for h/j/k/l
+movement_speed_fast_multiplier = 5.0   # Multiplier for H/J/K/L keys
+zoom_in_factor = 0.9                   # Multiplier for 'r' key (zoom in)
+zoom_out_factor = 1.1                  # Multiplier for 'R' key (zoom out)
+initial_theta = 0.0                    # Initial horizontal angle in radians
+initial_phi = 1.57                     # Initial vertical angle in radians (pi/2 = 90 degrees)
+
 [view]
 # Default view settings
 default_axis = "+z"                    # Default view axis: +x, -x, +y, -y, +z, -z
