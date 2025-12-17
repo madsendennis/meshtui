@@ -8,23 +8,148 @@ Reference: https://sw.kovidgoyal.net/kitty/graphics-protocol/
 """
 
 import base64
+import fcntl
 import os
+import select
 import sys
+import termios
+import tty
+
+# Cache the detection result to avoid multiple queries
+_kitty_protocol_supported = None
+_terminal_bg_is_light = None
+
+
+def detect_terminal_background() -> bool:
+    """Detect if terminal has a light background.
+
+    Uses OSC 11 query to get background color from terminal.
+    Falls back to assuming dark background if detection fails.
+
+    Returns:
+        True if background is light, False if dark or unknown
+    """
+    global _terminal_bg_is_light
+
+    # Return cached result
+    if _terminal_bg_is_light is not None:
+        return _terminal_bg_is_light
+
+    if not sys.stdout.isatty():
+        _terminal_bg_is_light = False
+        return False
+
+    try:
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        old_flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+
+        try:
+            tty.setraw(fd)
+            fcntl.fcntl(fd, fcntl.F_SETFL, old_flags | os.O_NONBLOCK)
+
+            # Query terminal background color using OSC 11
+            query = "\033]11;?\033\\"
+            sys.stdout.write(query)
+            sys.stdout.flush()
+
+            # Wait for response
+            if select.select([sys.stdin], [], [], 0.1)[0]:
+                try:
+                    response = os.read(fd, 1024).decode("utf-8", errors="ignore")
+                    # Response format: \033]11;rgb:RRRR/GGGG/BBBB\033\\
+                    if "rgb:" in response:
+                        # Extract RGB values
+                        rgb_part = response.split("rgb:")[1].split("\033")[0]
+                        r, g, b = rgb_part.split("/")
+                        # Convert hex to int (take first 2 chars of 4-char hex)
+                        r_val = int(r[:2], 16)
+                        g_val = int(g[:2], 16)
+                        b_val = int(b[:2], 16)
+                        # Calculate luminance (perceived brightness)
+                        luminance = 0.299 * r_val + 0.587 * g_val + 0.114 * b_val
+                        is_light = luminance > 128
+                        _terminal_bg_is_light = is_light
+                        return is_light
+                except (OSError, ValueError, IndexError):
+                    pass
+
+            # Default to dark background
+            _terminal_bg_is_light = False
+            return False
+
+        finally:
+            fcntl.fcntl(fd, fcntl.F_SETFL, old_flags)
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    except (OSError, termios.error):
+        _terminal_bg_is_light = False
+        return False
 
 
 def is_kitty_terminal() -> bool:
-    """Check if running in a Kitty-compatible terminal.
+    """Check if terminal supports Kitty graphics protocol.
+
+    Queries the terminal for graphics protocol support by sending a
+    detection query and checking for a valid response.
 
     Returns:
         True if the terminal supports Kitty graphics protocol
     """
-    # Check for TERM environment variable
-    term = os.environ.get("TERM", "")
-    if "kitty" in term:
-        return True
+    global _kitty_protocol_supported
 
-    # Check for KITTY_WINDOW_ID which is set by Kitty
-    return bool(os.environ.get("KITTY_WINDOW_ID"))
+    # Return cached result if available
+    if _kitty_protocol_supported is not None:
+        return _kitty_protocol_supported
+
+    # Quick check: if not a TTY, definitely not supported
+    if not sys.stdout.isatty():
+        _kitty_protocol_supported = False
+        return False
+
+    try:
+        # Save terminal settings
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        old_flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+
+        try:
+            # Set terminal to raw mode to read response
+            tty.setraw(fd)
+            # Make stdin non-blocking
+            fcntl.fcntl(fd, fcntl.F_SETFL, old_flags | os.O_NONBLOCK)
+
+            # Send a query for graphics protocol support
+            # Using a query with id=1, quiet=1 (suppress error messages)
+            # The terminal should respond if it supports the protocol
+            query = "\033_Gi=1,a=q;\033\\"
+            sys.stdout.write(query)
+            sys.stdout.flush()
+
+            # Wait for response with timeout
+            if select.select([sys.stdin], [], [], 0.1)[0]:
+                # Read response (non-blocking)
+                try:
+                    response = os.read(fd, 1024)
+                    # A valid Kitty graphics response starts with \033_G
+                    result = b"\033_G" in response
+                    _kitty_protocol_supported = result
+                    return result
+                except OSError:
+                    pass
+
+            _kitty_protocol_supported = False
+            return False
+
+        finally:
+            # Restore terminal settings and flags
+            fcntl.fcntl(fd, fcntl.F_SETFL, old_flags)
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    except (OSError, termios.error, ValueError):
+        # If we can't query (not a TTY, permissions, etc.), assume not supported
+        _kitty_protocol_supported = False
+        return False
 
 
 def get_terminal_size() -> tuple[int, int, int, int]:
@@ -45,9 +170,8 @@ def get_terminal_size() -> tuple[int, int, int, int]:
     """
     if not is_kitty_terminal():
         raise RuntimeError(
-            "Not running in a Kitty-compatible terminal. "
-            "This application requires Kitty terminal or a compatible terminal "
-            "that supports the Kitty graphics protocol."
+            "Terminal does not support the Kitty graphics protocol. "
+            "Please use a compatible terminal such as Kitty, Ghostty, or WezTerm."
         )
 
     # Get basic terminal dimensions (columns and rows)
@@ -72,21 +196,22 @@ def get_terminal_size() -> tuple[int, int, int, int]:
     return width_px, height_px, cell_width_px, cell_height_px
 
 
-def display_image(image_data: bytes, width: int, height: int) -> None:
+def display_image(image_data: bytes, width: int, height: int, cols: int = 0, rows: int = 0) -> None:
     """Display an image in the terminal using Kitty graphics protocol.
 
     Args:
         image_data: PNG image data as bytes
         width: Image width in pixels (optional, for protocol metadata)
         height: Image height in pixels (optional, for protocol metadata)
+        cols: Number of columns to fill (optional)
+        rows: Number of rows to fill (optional)
 
     Raises:
         RuntimeError: If not running in a Kitty-compatible terminal
     """
     if not is_kitty_terminal():
         raise RuntimeError(
-            "Not running in a Kitty-compatible terminal. "
-            "This application requires Kitty terminal."
+            "Terminal does not support the Kitty graphics protocol. Cannot display images."
         )
 
     # Encode image data to base64
@@ -98,11 +223,20 @@ def display_image(image_data: bytes, width: int, height: int) -> None:
 
     # Send the image using Kitty graphics protocol
     # Format: ESC _G<control_data>;<payload>ESC \
-    # Control data: a=T (transmit), f=100 (PNG format), t=d (direct transmission)
+    # Parameters:
+    #   a=T - transmit image data
+    #   f=100 - PNG format (100 = direct RGB data, but we use PNG)
+    #   t=d - direct data (base64-encoded PNG)
+    #   c, r - columns and rows to fill
     for i, chunk in enumerate(chunks):
         if i == 0:
             # First chunk - include all control data
             control = "a=T,f=100,t=d"
+
+            # Add scaling parameters if provided
+            if cols > 0 and rows > 0:
+                control += f",c={cols},r={rows}"
+
             if i == len(chunks) - 1:
                 # Only one chunk - no more data
                 control += ",m=0"
@@ -120,5 +254,5 @@ def display_image(image_data: bytes, width: int, height: int) -> None:
         sys.stdout.write(f"\033_G{control};{chunk}\033\\")
         sys.stdout.flush()
 
-    # Print a newline after the image
-    print()
+    # No newline after image to prevent scrolling in TUI mode
+    # print()

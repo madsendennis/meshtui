@@ -8,7 +8,7 @@ MeshTUI is a Python application that allows you to view 3D meshes directly in yo
 
 ### Usage
 
-**Important**: This application requires the Kitty terminal or a compatible terminal that supports the Kitty graphics protocol.
+**Important**: This application requires a terminal that supports the Kitty graphics protocol (such as Kitty, Ghostty, WezTerm, or other compatible terminals).
 
 ```bash
 # View a mesh file
@@ -19,17 +19,22 @@ meshtui model.stl
 ```
 
 The viewer will:
-1. Detect if running in Kitty terminal (exits with error if not)
-2. Query terminal dimensions for optimal display
-3. Load and process the mesh file (normalizes and centers the mesh)
-4. Render a 3D view using pyrender with proper lighting
-5. Display the image directly in the terminal
+1. Detect if terminal supports Kitty graphics protocol (exits with error if not)
+2. Detect terminal background color (light/dark) for optimal mesh coloring
+3. Query terminal dimensions for optimal display
+4. Load and process the mesh file (normalizes and centers the mesh)
+5. Render a 3D view using pyrender with transparent background and proper lighting
+6. Display the image centered in the terminal using full terminal size
+7. Automatically rerender when terminal is resized
+8. Wait for user to exit (press 'q', Esc, or Ctrl+C)
 
 Example output:
 ```
 Loading mesh: model.ply
 Rendering 1523 vertices, 3042 faces...
-[Image displays in terminal]
+Terminal size: 1920x1080 pixels
+[Image displays full-screen in terminal with transparent background]
+Press 'q', Esc, or Ctrl+C to exit. Terminal will auto-resize.
 ```
 
 ## Features (Phase 1)
@@ -37,8 +42,12 @@ Rendering 1523 vertices, 3042 faces...
 - 🖼️ Display 3D meshes in the terminal using Kitty graphics protocol
 - 📦 Support for .ply and .stl mesh formats
 - 🎨 Automatic mesh centering and scaling
-- 📐 Terminal dimension detection for optimal rendering
+- 🌓 Smart background detection (light/dark) with adaptive mesh coloring
+- 🔍 Transparent background that matches terminal theme
+- 📐 Full terminal size rendering for maximum viewing area
+- 🔄 Automatic rerendering on terminal resize (SIGWINCH)
 - ⚡ Built with UV for fast dependency management
+- 🎯 Easy exit with 'q', Esc, or Ctrl+C
 
 ## Supported Formats
 
@@ -48,7 +57,11 @@ Rendering 1523 vertices, 3042 faces...
 ## Requirements
 
 - Python 3.12 or higher
-- Kitty terminal (or compatible terminal supporting Kitty graphics protocol)
+- A terminal that supports the Kitty graphics protocol:
+  - Kitty
+  - Ghostty
+  - WezTerm
+  - Or any other terminal with Kitty graphics protocol support
 - UV package manager
 
 ## Technology Stack

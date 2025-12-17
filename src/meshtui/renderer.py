@@ -7,12 +7,15 @@ import pyrender
 import trimesh
 from PIL import Image
 
+from meshtui.kitty_protocol import detect_terminal_background
+
 
 def render_mesh(mesh: trimesh.Trimesh, width: int, height: int) -> bytes:
     """Render a mesh to a PNG image.
 
     Creates a scene with the mesh, camera, and lighting, then renders it
-    to a PNG image suitable for display in the terminal.
+    to a PNG image suitable for display in the terminal. Uses transparent
+    background to match terminal and adjusts mesh color for contrast.
 
     Args:
         mesh: The trimesh object to render
@@ -28,11 +31,31 @@ def render_mesh(mesh: trimesh.Trimesh, width: int, height: int) -> bytes:
     if width <= 0 or height <= 0:
         raise ValueError(f"Invalid dimensions: {width}x{height}")
 
-    # Create pyrender mesh from trimesh
-    mesh_pr = pyrender.Mesh.from_trimesh(mesh)
+    # Detect terminal background to choose appropriate mesh color
+    is_light_bg = detect_terminal_background()
 
-    # Create scene
-    scene = pyrender.Scene(ambient_light=[0.3, 0.3, 0.3])
+    # Create a copy of the mesh to modify its colors
+    mesh = mesh.copy()
+
+    # Set mesh color based on background
+    # For light background: use dark gray (not black)
+    # For dark background: use light gray (not white)
+    if is_light_bg:
+        # Dark gray for light backgrounds
+        base_color = np.array([0.3, 0.3, 0.35, 1.0])  # Slightly bluish dark gray
+    else:
+        # Light gray for dark backgrounds
+        base_color = np.array([0.75, 0.75, 0.8, 1.0])  # Slightly bluish light gray
+
+    # Apply color to all vertices
+    vertex_colors = np.tile(base_color, (len(mesh.vertices), 1))
+    mesh.visual.vertex_colors = vertex_colors
+
+    # Create pyrender mesh from trimesh
+    mesh_pr = pyrender.Mesh.from_trimesh(mesh, smooth=True)
+
+    # Create scene with no background (transparent)
+    scene = pyrender.Scene(ambient_light=[0.4, 0.4, 0.4], bg_color=[0, 0, 0, 0])
     scene.add(mesh_pr)
 
     # Add directional light
@@ -40,46 +63,66 @@ def render_mesh(mesh: trimesh.Trimesh, width: int, height: int) -> bytes:
     scene.add(light, pose=_get_light_pose())
 
     # Set up camera
-    # Position camera to view the entire mesh
-    camera = pyrender.PerspectiveCamera(yfov=np.pi / 3.0, aspectRatio=width / height)
-    camera_pose = _calculate_camera_pose(mesh)
+    # Position camera to view the entire mesh, optimally filling the viewport
+    aspect_ratio = width / height
+    camera = pyrender.PerspectiveCamera(yfov=np.pi / 3.0, aspectRatio=aspect_ratio)
+    camera_pose = _calculate_camera_pose(mesh, aspect_ratio)
     scene.add(camera, pose=camera_pose)
 
-    # Render with offscreen renderer
+    # Render with offscreen renderer with alpha channel
+    flags = pyrender.RenderFlags.RGBA
     renderer = pyrender.OffscreenRenderer(width, height)
     try:
-        color, _ = renderer.render(scene)
+        color, _ = renderer.render(scene, flags=flags)
     finally:
         renderer.delete()
 
-    # Convert to PNG bytes
-    image = Image.fromarray(color)
+    # Convert to PNG bytes with alpha channel
+    image = Image.fromarray(color, mode="RGBA")
     img_bytes = io.BytesIO()
     image.save(img_bytes, format="PNG")
     return img_bytes.getvalue()
 
 
-def _calculate_camera_pose(mesh: trimesh.Trimesh) -> np.ndarray:
-    """Calculate camera pose to view the entire mesh.
+def _calculate_camera_pose(mesh: trimesh.Trimesh, aspect_ratio: float) -> np.ndarray:
+    """Calculate camera pose to view the entire mesh optimally.
 
-    Positions camera at an angle to show the mesh clearly.
+    Positions camera along the Z-axis looking at the mesh, with distance
+    calculated to fit the entire mesh with padding.
 
     Args:
         mesh: The mesh to view
+        aspect_ratio: Width/height ratio of the viewport
 
     Returns:
         4x4 camera pose matrix
     """
-    # Position camera at distance to see entire mesh
-    # Using a fixed distance that works well for normalized meshes
-    distance = 2.5
+    # Get mesh bounding box (already centered at origin from mesh_loader)
+    bounds = mesh.bounds
+    mesh_size = np.max(bounds[1] - bounds[0])
 
-    # Position camera at 45 degree angle for better 3D visualization
-    angle = np.pi / 4  # 45 degrees
-    camera_pos = np.array([np.sin(angle) * distance, distance * 0.5, np.cos(angle) * distance])
+    # Calculate optimal distance to fit mesh in view with generous padding
+    # Field of view is 60 degrees (π/3), so we need distance = size / (2 * tan(fov/2))
+    fov = np.pi / 3.0
+    # Use 1.5x padding to ensure full mesh visibility with margin
+    vertical_distance = (mesh_size * 1.5) / (2 * np.tan(fov / 2))
 
-    # Look at the center of the mesh
-    target = np.array([0, 0, 0])
+    # Account for aspect ratio
+    if aspect_ratio > 1.0:
+        # Wider screen - vertical extent is limiting factor
+        distance = vertical_distance
+    else:
+        # Taller screen - need to check horizontal fit
+        horizontal_fov = 2 * np.arctan(np.tan(fov / 2) * aspect_ratio)
+        horizontal_distance = (mesh_size * 1.5) / (2 * np.tan(horizontal_fov / 2))
+        distance = max(vertical_distance, horizontal_distance)
+
+    # Position camera along the +Z axis (one of the main axes)
+    # Mesh is centered at origin by mesh_loader, so target is [0,0,0]
+    target = np.array([0.0, 0.0, 0.0])
+    camera_pos = np.array([0.0, 0.0, distance])
+
+    # Up vector
     up = np.array([0, 1, 0])
 
     # Create view matrix
