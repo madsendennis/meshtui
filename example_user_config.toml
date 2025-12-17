@@ -1,0 +1,18 @@
+# Example user configuration for meshtui
+# Place this file at ~/.config/meshtui/config.toml (not implemented yet)
+#
+# You only need to specify values you want to override from the defaults.
+# All other values will be inherited from default_config.toml
+
+# Example: Make the mesh more metallic
+[material]
+metallic_factor = 0.6
+roughness_factor = 0.4
+
+# Example: Adjust lighting intensity
+[lighting]
+key_light_intensity = 5.0
+
+# Example: Change default view to look from the top
+[view]
+default_axis = "+y"

@@ -1,0 +1,47 @@
+# meshtui rendering configuration
+# This file contains default rendering settings for the 3D mesh viewer
+
+[camera]
+# Camera settings
+fov_degrees = 60.0                     # Field of view in degrees (vertical)
+distance_padding = 1.0                 # Multiplier for auto-calculated distance (larger = farther)
+
+[view]
+# Default view settings
+default_axis = "+z"                    # Default view axis: +x, -x, +y, -y, +z, -z
+
+# Up vectors for cycling with u/U keys (first one is the default)
+up_vectors = [ # First index is default
+    [0.0, 0.0, 1.0],   # Z-up
+    [0.0, 1.0, 0.0],   # Y-up
+    [0.0, -1.0, 0.0],  # Y-down
+    [0.0, 0.0, -1.0],  # Z-down
+]
+
+[material]
+# PBR Material settings
+base_color = [0.85, 0.85, 0.87, 1.0]  # Light grey RGBA
+metallic_factor = 0.2                  # Low metallic for matte look (0.0-1.0)
+roughness_factor = 0.7                 # High roughness reduces reflections (0.0-1.0)
+
+[scene]
+# Scene environment settings
+ambient_light = [0.15, 0.15, 0.15]     # Moderate ambient light RGB
+bg_color_dark = [26, 27, 38, 0]        # Background for dark terminals (RGBA)
+bg_color_light = [255, 255, 255, 0]    # Background for light terminals (RGBA)
+
+[lighting]
+# Raymond 3-point lighting system intensities
+key_light_intensity = 3.5              # Main headlamp from camera
+fill_light_intensity = 1.5             # Fill light (45° left, 15° up)
+fill_light_azimuth = -45.0             # Azimuth angle in degrees
+fill_light_elevation = 15.0            # Elevation angle in degrees
+rim_light_intensity = 0.6              # Rim/back light (135° right, 10° up)
+rim_light_azimuth = 135.0              # Azimuth angle in degrees
+rim_light_elevation = 10.0             # Elevation angle in degrees
+
+[wireframe]
+# Wireframe overlay settings
+default_thickness = 0.0                # Default wireframe thickness (0.0 = off)
+color_dark_bg = [255, 255, 255, 255]   # White wireframe for dark backgrounds
+color_light_bg = [0, 0, 0, 255]        # Black wireframe for light backgrounds

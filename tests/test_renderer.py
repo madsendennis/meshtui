@@ -19,7 +19,10 @@ class TestRenderMesh:
         cube = trimesh.creation.box(extents=[1, 1, 1])
 
         # Render at a reasonable size
-        image_data = render_mesh(cube, 400, 300)
+        image_data, camera_pos = render_mesh(cube, 400, 300)
+
+        # Verify camera position is returned
+        assert len(camera_pos) == 3
 
         # Verify we got PNG data
         assert image_data.startswith(b"\x89PNG")
@@ -33,7 +36,7 @@ class TestRenderMesh:
         """Test rendering a sphere mesh."""
         sphere = trimesh.creation.icosphere(subdivisions=2)
 
-        image_data = render_mesh(sphere, 300, 300)
+        image_data, _ = render_mesh(sphere, 300, 300)
 
         # Verify PNG format
         assert image_data.startswith(b"\x89PNG")
@@ -46,7 +49,7 @@ class TestRenderMesh:
 
         # Test different aspect ratios
         for width, height in [(100, 100), (800, 600), (1920, 1080), (200, 400)]:
-            image_data = render_mesh(mesh, width, height)
+            image_data, _ = render_mesh(mesh, width, height)
             img = Image.open(io.BytesIO(image_data))
             assert img.size == (width, height)
 
@@ -76,7 +79,7 @@ class TestRenderMesh:
         # Create a torus (more complex than cube)
         torus = trimesh.creation.torus(major_radius=0.5, minor_radius=0.2)
 
-        image_data = render_mesh(torus, 500, 500)
+        image_data, _ = render_mesh(torus, 500, 500)
 
         # Verify PNG format
         assert image_data.startswith(b"\x89PNG")
@@ -87,7 +90,7 @@ class TestRenderMesh:
         """Test that rendered image contains actual content."""
         mesh = trimesh.creation.box()
 
-        image_data = render_mesh(mesh, 200, 200)
+        image_data, _ = render_mesh(mesh, 200, 200)
         img = Image.open(io.BytesIO(image_data))
 
         # Convert to numpy array
@@ -102,7 +105,7 @@ class TestRenderMesh:
         mesh = trimesh.creation.box()
 
         # Should work even with small dimensions
-        image_data = render_mesh(mesh, 10, 10)
+        image_data, _ = render_mesh(mesh, 10, 10)
         img = Image.open(io.BytesIO(image_data))
         assert img.size == (10, 10)
 
@@ -111,6 +114,6 @@ class TestRenderMesh:
         mesh = trimesh.creation.box()
 
         # Should work with larger dimensions
-        image_data = render_mesh(mesh, 2000, 1500)
+        image_data, _ = render_mesh(mesh, 2000, 1500)
         img = Image.open(io.BytesIO(image_data))
         assert img.size == (2000, 1500)

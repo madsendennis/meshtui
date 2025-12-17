@@ -9,6 +9,7 @@ from typing import Any
 
 import trimesh
 
+from meshtui import config
 from meshtui.kitty_protocol import (
     clear_images,
     display_image,
@@ -18,38 +19,37 @@ from meshtui.kitty_protocol import (
 from meshtui.mesh_loader import load_mesh
 from meshtui.renderer import render_mesh
 
+# Load configuration defaults
+_VIEW_CONFIG = config.get_view_config()
+_WIREFRAME_CONFIG = config.get_wireframe_config()
+
 # Global state for handling terminal resize
 _current_mesh: trimesh.Trimesh | None = None
 _resize_pending = False
-_view_axis = "+z"
-_wireframe_thickness = 0.0
+_view_axis = _VIEW_CONFIG["default_axis"]
+_wireframe_thickness = _WIREFRAME_CONFIG["default_thickness"]
 _show_help = False
-_up_vector_cycle_index = -1
+_up_vector_cycle_index = -1  # -1 means use default (index 0)
 _up_vector_override: tuple[float, float, float] | None = None
 _last_render_params: dict[str, Any] = {}
 _last_image_data: bytes | None = None
 
 
-_UP_VECTORS: list[tuple[float, float, float]] = [
-    (0.0, 1.0, 0.0),
-    (0.0, -1.0, 0.0),
-    (0.0, 0.0, 1.0),
-    (0.0, 0.0, -1.0),
-]
+# Load up vector list from config (index 0 is the default)
+_UP_VECTORS: list[tuple[float, float, float]] = [tuple(v) for v in _VIEW_CONFIG["up_vectors"]]
+
+# Camera position tracking
+_camera_position: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
 
 def _effective_up_vector(
     view_axis: str, up_override: tuple[float, float, float] | None
 ) -> tuple[float, float, float]:
+    """Get the effective up vector, using config default if no override."""
     if up_override is not None:
         return up_override
-
-    axis = view_axis.lower()
-    if axis == "+y":
-        return (0.0, 0.0, -1.0)
-    if axis == "-y":
-        return (0.0, 0.0, 1.0)
-    return (0.0, 1.0, 0.0)
+    # Use first up vector from config as default
+    return _UP_VECTORS[0] if _UP_VECTORS else (0.0, 1.0, 0.0)
 
 
 def _format_vec3(v: tuple[float, float, float]) -> str:
@@ -78,7 +78,8 @@ def draw_interface(cols: int, rows: int) -> None:
 
     # Footer
     up_text = _format_vec3(_effective_up_vector(_view_axis, _up_vector_override))
-    footer_text = f" q: Quit | ?: Help | u/U: Up {up_text}"
+    cam_text = _format_vec3(_camera_position)
+    footer_text = f" q: Quit | ?: Help | u/U: Up {up_text} | Cam {cam_text}"
     # Pad footer with spaces to clear line
     padding = " " * max(0, cols - len(footer_text))
     print(f"\033[{rows};1H{footer_text}{padding}", end="")
@@ -166,7 +167,7 @@ def render_and_display(
         raise_errors: Whether to raise exceptions (for initial render) or just print them
             (for resize)
     """
-    global _last_render_params, _last_image_data
+    global _last_render_params, _last_image_data, _camera_position
 
     try:
         width_px, height_px, cell_w, cell_h = get_terminal_size()
@@ -206,15 +207,18 @@ def render_and_display(
         }
 
         if current_params != _last_render_params or _last_image_data is None:
-            image_data = render_mesh(
+            # Always pass effective up vector (config default or user-cycled)
+            effective_up = _effective_up_vector(_view_axis, _up_vector_override)
+            image_data, cam_pos = render_mesh(
                 mesh,
                 inner_width_px,
                 inner_height_px,
                 view_axis=_view_axis,
                 wireframe_thickness=_wireframe_thickness,
-                up_vector_override=_up_vector_override,
+                up_vector_override=effective_up,
             )
             _last_image_data = image_data
+            _camera_position = cam_pos
             _last_render_params = current_params
         else:
             image_data = _last_image_data
