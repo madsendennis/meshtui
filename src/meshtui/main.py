@@ -9,13 +9,53 @@ from typing import Any
 
 import trimesh
 
-from meshtui.kitty_protocol import display_image, get_terminal_size
+from meshtui.kitty_protocol import (
+    clear_images,
+    display_image,
+    get_terminal_bg_ansi,
+    get_terminal_size,
+)
 from meshtui.mesh_loader import load_mesh
 from meshtui.renderer import render_mesh
 
 # Global state for handling terminal resize
 _current_mesh: trimesh.Trimesh | None = None
 _resize_pending = False
+_view_axis = "+z"
+_wireframe_thickness = 0.0
+_show_help = False
+_up_vector_cycle_index = -1
+_up_vector_override: tuple[float, float, float] | None = None
+_last_render_params: dict[str, Any] = {}
+_last_image_data: bytes | None = None
+
+
+_UP_VECTORS: list[tuple[float, float, float]] = [
+    (0.0, 1.0, 0.0),
+    (0.0, -1.0, 0.0),
+    (0.0, 0.0, 1.0),
+    (0.0, 0.0, -1.0),
+]
+
+
+def _effective_up_vector(
+    view_axis: str, up_override: tuple[float, float, float] | None
+) -> tuple[float, float, float]:
+    if up_override is not None:
+        return up_override
+
+    axis = view_axis.lower()
+    if axis == "+y":
+        return (0.0, 0.0, -1.0)
+    if axis == "-y":
+        return (0.0, 0.0, 1.0)
+    return (0.0, 1.0, 0.0)
+
+
+def _format_vec3(v: tuple[float, float, float]) -> str:
+    # Keep it compact for the footer.
+    x, y, z = (int(v[0]), int(v[1]), int(v[2]))
+    return f"({x},{y},{z})"
 
 
 def handle_resize(signum: int, frame: Any) -> None:
@@ -37,12 +77,81 @@ def draw_interface(cols: int, rows: int) -> None:
     print(f"\033[{rows-1};1H└{'─' * (cols - 2)}┘", end="")
 
     # Footer
-    footer_text = " q: Quit | Esc: Exit | Ctrl+C: Exit"
+    up_text = _format_vec3(_effective_up_vector(_view_axis, _up_vector_override))
+    footer_text = f" q: Quit | ?: Help | u/U: Up {up_text}"
     # Pad footer with spaces to clear line
     padding = " " * max(0, cols - len(footer_text))
     print(f"\033[{rows};1H{footer_text}{padding}", end="")
 
     # Flush
+    sys.stdout.flush()
+
+
+def draw_help_menu(cols: int, rows: int) -> None:
+    """Draw the help menu overlay."""
+    if not _show_help:
+        return
+
+    # Calculate menu dimensions (larger size)
+    menu_width = 60
+    menu_height = 16
+    start_col = (cols - menu_width) // 2
+    start_row = (rows - menu_height) // 2
+
+    # Get background color
+    bg_ansi = get_terminal_bg_ansi()
+    fg_ansi = "\033[97m"  # White foreground for text
+    reset_ansi = "\033[0m"
+
+    up_text = _format_vec3(_effective_up_vector(_view_axis, _up_vector_override))
+
+    # Content
+    lines = [
+        "Controls:",
+        "  x/X : View from +/- X axis",
+        "  y/Y : View from +/- Y axis",
+        "  z/Z : View from +/- Z axis",
+        f"  u/U : Cycle camera Up vector (current {up_text})",
+        "  G   : Grid ON (wireframe)",
+        "  g   : Grid OFF (solid)",
+        "  ?   : Toggle this help menu",
+        "  Esc : Close help menu",
+        "  q   : Quit",
+        "",
+        "Press Esc or ? to close",
+    ]
+
+    # Draw each row of the menu with solid background
+    for i in range(menu_height):
+        row = start_row + i
+
+        # Position cursor
+        print(f"\033[{row};{start_col}H", end="")
+
+        # Build the line content
+        if i == 0:
+            # Top border with title
+            line_text = f"┌{'─' * (menu_width - 2)}┐"
+            # Insert title in center
+            title = " HELP "
+            title_pos = (menu_width - len(title)) // 2
+            line_text = line_text[:title_pos] + title + line_text[title_pos + len(title) :]
+        elif i == menu_height - 1:
+            # Bottom border
+            line_text = f"└{'─' * (menu_width - 2)}┘"
+        else:
+            # Content line
+            line_idx = i - 1
+            if line_idx < len(lines):
+                line = lines[line_idx]
+                content = f" {line:<{menu_width - 4}} "
+            else:
+                content = " " * (menu_width - 2)
+            line_text = f"│{content}│"
+
+        # Print with background and foreground
+        print(f"{bg_ansi}{fg_ansi}{line_text}{reset_ansi}", end="")
+
     sys.stdout.flush()
 
 
@@ -57,6 +166,8 @@ def render_and_display(
         raise_errors: Whether to raise exceptions (for initial render) or just print them
             (for resize)
     """
+    global _last_render_params, _last_image_data
+
     try:
         width_px, height_px, cell_w, cell_h = get_terminal_size()
         cols = width_px // cell_w
@@ -84,10 +195,46 @@ def render_and_display(
     inner_height_px = inner_rows * cell_h
 
     try:
-        image_data = render_mesh(mesh, inner_width_px, inner_height_px)
-        # Move cursor to inside top-left (row 2, col 2)
-        print("\033[2;2H", end="", flush=True)
-        display_image(image_data, inner_width_px, inner_height_px, cols=inner_cols, rows=inner_rows)
+        # Check if we need to re-render
+        current_params = {
+            "mesh_id": id(mesh),
+            "width": inner_width_px,
+            "height": inner_height_px,
+            "axis": _view_axis,
+            "wireframe": _wireframe_thickness,
+            "up": _up_vector_override,
+        }
+
+        if current_params != _last_render_params or _last_image_data is None:
+            image_data = render_mesh(
+                mesh,
+                inner_width_px,
+                inner_height_px,
+                view_axis=_view_axis,
+                wireframe_thickness=_wireframe_thickness,
+                up_vector_override=_up_vector_override,
+            )
+            _last_image_data = image_data
+            _last_render_params = current_params
+        else:
+            image_data = _last_image_data
+
+        if _show_help:
+            # When showing help, delete images and draw menu
+            clear_images()
+            draw_help_menu(cols, rows)
+        else:
+            # Move cursor to inside top-left (row 2, col 2)
+            print("\033[2;2H", end="", flush=True)
+            # Display the image
+            display_image(
+                image_data,
+                inner_width_px,
+                inner_height_px,
+                cols=inner_cols,
+                rows=inner_rows,
+            )
+
     except Exception as e:
         if raise_errors:
             raise
@@ -95,17 +242,24 @@ def render_and_display(
 
 
 def wait_for_exit() -> None:
-    """Wait for user to press 'q', Esc, or Ctrl+C to exit.
+    """Wait for user input to control the viewer.
 
-    Also handles terminal resize events and rerenders the mesh.
+    Handles:
+    - q: Quit
+    - x/X, y/Y, z/Z: Change view axis
+    - g: Toggle grid/wireframe
+    - ?: Toggle help
+    - Resize events
     """
     global _resize_pending
+    global _show_help
+    global _up_vector_cycle_index
+    global _up_vector_override
+    global _view_axis
+    global _wireframe_thickness
 
     if not sys.stdin.isatty():
         return
-
-    # Don't print instructions in TUI mode to avoid scrolling
-    # print("\nPress 'q', Esc, or Ctrl+C to exit. Terminal will auto-resize.", end="", flush=True)
 
     try:
         fd = sys.stdin.fileno()
@@ -123,9 +277,62 @@ def wait_for_exit() -> None:
 
                 if select.select([sys.stdin], [], [], 0.1)[0]:
                     char = sys.stdin.read(1)
-                    # Check for 'q', 'Q', Esc (ASCII 27), or Ctrl+C (ASCII 3)
-                    if char in ("q", "Q", "\x1b", "\x03"):
+
+                    needs_rerender = False
+
+                    if char == "q":
                         break
+                    elif char == "x":
+                        _view_axis = "+x"
+                        needs_rerender = True
+                    elif char == "X":
+                        _view_axis = "-x"
+                        needs_rerender = True
+                    elif char == "y":
+                        _view_axis = "+y"
+                        needs_rerender = True
+                    elif char == "Y":
+                        _view_axis = "-y"
+                        needs_rerender = True
+                    elif char == "z":
+                        _view_axis = "+z"
+                        needs_rerender = True
+                    elif char == "Z":
+                        _view_axis = "-z"
+                        needs_rerender = True
+                    elif char == "G":
+                        if _wireframe_thickness == 0.0:
+                            _wireframe_thickness = 1.0
+                        else:
+                            _wireframe_thickness += 1.0
+                        needs_rerender = True
+                    elif char == "g":
+                        _wireframe_thickness = 0.0
+                        needs_rerender = True
+                    elif char == "u":
+                        if _up_vector_cycle_index == -1:
+                            _up_vector_cycle_index = 0
+                        else:
+                            _up_vector_cycle_index = (_up_vector_cycle_index + 1) % len(_UP_VECTORS)
+                        _up_vector_override = _UP_VECTORS[_up_vector_cycle_index]
+                        needs_rerender = True
+                    elif char == "U":
+                        if _up_vector_cycle_index == -1:
+                            _up_vector_cycle_index = len(_UP_VECTORS) - 1
+                        else:
+                            _up_vector_cycle_index = (_up_vector_cycle_index - 1) % len(_UP_VECTORS)
+                        _up_vector_override = _UP_VECTORS[_up_vector_cycle_index]
+                        needs_rerender = True
+                    elif char == "?":
+                        _show_help = not _show_help
+                        needs_rerender = True
+                    elif char == "\x1b" and _show_help:  # Esc
+                        _show_help = False
+                        needs_rerender = True
+
+                    if needs_rerender and _current_mesh is not None:
+                        render_and_display(_current_mesh, clear_screen=True)
+
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
     except (OSError, termios.error):

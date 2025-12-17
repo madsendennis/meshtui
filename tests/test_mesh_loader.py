@@ -25,12 +25,10 @@ class TestLoadMesh:
             mesh = load_mesh(Path("fake.ply"))
 
             assert isinstance(mesh, trimesh.Trimesh)
-            # Mesh should be centered (centroid at origin)
-            assert np.allclose(mesh.centroid, [0, 0, 0], atol=1e-10)
-            # Mesh should be normalized (largest dimension is 1)
+            # Mesh should preserve world-space coordinates (no normalization)
             bounds = mesh.bounds
             max_dim = np.max(bounds[1] - bounds[0])
-            assert np.isclose(max_dim, 1.0, atol=1e-10)
+            assert np.isclose(max_dim, 2.0, atol=1e-10)
 
     def test_file_not_found(self) -> None:
         """Test error when file doesn't exist."""
@@ -126,7 +124,7 @@ class TestLoadMesh:
             load_mesh(Path("corrupt.ply"))
 
     def test_normalizes_large_mesh(self) -> None:
-        """Test that large meshes are normalized to unit scale."""
+        """Test that large meshes preserve their original scale."""
         # Create a large cube (100x100x100)
         large_cube = trimesh.creation.box(extents=[100, 100, 100])
 
@@ -136,13 +134,12 @@ class TestLoadMesh:
         ):
             mesh = load_mesh(Path("large.ply"))
 
-            # Should be normalized to fit in 1x1x1 box
             bounds = mesh.bounds
             max_dim = np.max(bounds[1] - bounds[0])
-            assert np.isclose(max_dim, 1.0, atol=1e-10)
+            assert np.isclose(max_dim, 100.0, atol=1e-10)
 
     def test_normalizes_small_mesh(self) -> None:
-        """Test that small meshes are normalized to unit scale."""
+        """Test that small meshes preserve their original scale."""
         # Create a small cube (0.01x0.01x0.01)
         small_cube = trimesh.creation.box(extents=[0.01, 0.01, 0.01])
 
@@ -152,7 +149,6 @@ class TestLoadMesh:
         ):
             mesh = load_mesh(Path("small.ply"))
 
-            # Should be normalized to fit in 1x1x1 box
             bounds = mesh.bounds
             max_dim = np.max(bounds[1] - bounds[0])
-            assert np.isclose(max_dim, 1.0, atol=1e-10)
+            assert np.isclose(max_dim, 0.01, atol=1e-10)

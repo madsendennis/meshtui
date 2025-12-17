@@ -2,14 +2,13 @@
 
 from pathlib import Path
 
-import numpy as np
 import trimesh
 
 
 def load_mesh(file_path: Path) -> trimesh.Trimesh:
     """Load a mesh from a file.
 
-    Loads and processes a mesh file, centering and normalizing it for display.
+    Loads a mesh file without altering its world-space coordinates.
 
     Args:
         file_path: Path to the mesh file (.ply or .stl)
@@ -48,14 +47,5 @@ def load_mesh(file_path: Path) -> trimesh.Trimesh:
 
     if not isinstance(mesh, trimesh.Trimesh):
         raise ValueError(f"Loaded object is not a valid mesh: {type(mesh)}")
-
-    # Center the mesh at origin
-    mesh.vertices -= mesh.centroid
-
-    # Normalize to unit scale (fit in 1x1x1 box)
-    bounds = mesh.bounds
-    scale = np.max(bounds[1] - bounds[0])
-    if scale > 0:
-        mesh.vertices /= scale
 
     return mesh

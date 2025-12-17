@@ -18,6 +18,23 @@ import tty
 # Cache the detection result to avoid multiple queries
 _kitty_protocol_supported = None
 _terminal_bg_is_light = None
+_terminal_bg_color: tuple[int, int, int] | None = None
+
+
+def get_terminal_bg_ansi() -> str:
+    """Get ANSI escape code for terminal background color.
+
+    Returns:
+        ANSI escape code string (e.g. "\033[48;2;0;0;0m")
+    """
+    detect_terminal_background()  # Ensure color is detected
+    if _terminal_bg_color:
+        r, g, b = _terminal_bg_color
+        return f"\033[48;2;{r};{g};{b}m"
+    # Fallback: Black for dark, White for light
+    if _terminal_bg_is_light:
+        return "\033[48;2;255;255;255m"  # White RGB
+    return "\033[48;2;0;0;0m"  # Black RGB
 
 
 def detect_terminal_background() -> bool:
@@ -29,7 +46,7 @@ def detect_terminal_background() -> bool:
     Returns:
         True if background is light, False if dark or unknown
     """
-    global _terminal_bg_is_light
+    global _terminal_bg_is_light, _terminal_bg_color
 
     # Return cached result
     if _terminal_bg_is_light is not None:
@@ -54,7 +71,7 @@ def detect_terminal_background() -> bool:
             sys.stdout.flush()
 
             # Wait for response
-            if select.select([sys.stdin], [], [], 0.1)[0]:
+            if select.select([sys.stdin], [], [], 0.2)[0]:
                 try:
                     response = os.read(fd, 1024).decode("utf-8", errors="ignore")
                     # Response format: \033]11;rgb:RRRR/GGGG/BBBB\033\\
@@ -66,6 +83,9 @@ def detect_terminal_background() -> bool:
                         r_val = int(r[:2], 16)
                         g_val = int(g[:2], 16)
                         b_val = int(b[:2], 16)
+
+                        _terminal_bg_color = (r_val, g_val, b_val)
+
                         # Calculate luminance (perceived brightness)
                         luminance = 0.299 * r_val + 0.587 * g_val + 0.114 * b_val
                         is_light = luminance > 128
@@ -231,7 +251,8 @@ def display_image(image_data: bytes, width: int, height: int, cols: int = 0, row
     for i, chunk in enumerate(chunks):
         if i == 0:
             # First chunk - include all control data
-            control = "a=T,f=100,t=d"
+            # z=-1 places image below text
+            control = "a=T,f=100,t=d,z=-1"
 
             # Add scaling parameters if provided
             if cols > 0 and rows > 0:
@@ -256,3 +277,10 @@ def display_image(image_data: bytes, width: int, height: int, cols: int = 0, row
 
     # No newline after image to prevent scrolling in TUI mode
     # print()
+
+
+def clear_images() -> None:
+    """Clear all Kitty graphics images from the terminal."""
+    # Delete all images: a=d (delete), d=a (all images)
+    sys.stdout.write("\033_Ga=d,d=a;\033\\")
+    sys.stdout.flush()
