@@ -8,8 +8,28 @@ MeshTUI is a Python application that allows you to view 3D meshes directly in yo
 
 ### Usage
 
+**Important**: This application requires the Kitty terminal or a compatible terminal that supports the Kitty graphics protocol.
+
 ```bash
+# View a mesh file
 meshtui /path/to/meshfile.ply
+
+# Works with .stl files too
+meshtui model.stl
+```
+
+The viewer will:
+1. Detect if running in Kitty terminal (exits with error if not)
+2. Query terminal dimensions for optimal display
+3. Load and process the mesh file (normalizes and centers the mesh)
+4. Render a 3D view using pyrender with proper lighting
+5. Display the image directly in the terminal
+
+Example output:
+```
+Loading mesh: model.ply
+Rendering 1523 vertices, 3042 faces...
+[Image displays in terminal]
 ```
 
 ## Features (Phase 1)
