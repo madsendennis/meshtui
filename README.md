@@ -135,23 +135,6 @@ uv run mypy src/
 uv run meshtui /path/to/mesh.ply
 ```
 
-### Project Structure
-
-```
-meshtui/
-├── src/
-│   └── meshtui/
-│       ├── __init__.py          # Package initialization
-│       ├── main.py              # CLI entry point
-│       ├── mesh_loader.py       # Mesh loading with trimesh
-│       ├── renderer.py          # Rendering with pyrender
-│       └── kitty_protocol.py    # Kitty graphics protocol
-├── tests/                       # Test suite
-├── .pre-commit-config.yaml      # Pre-commit hooks config
-├── pyproject.toml               # Project configuration
-└── README.md
-```
-
 ## License
 
 [To be determined]

@@ -15,6 +15,7 @@ zoom_in_factor = 0.9                   # Multiplier for 'r' key (zoom in)
 zoom_out_factor = 1.1                  # Multiplier for 'R' key (zoom out)
 initial_theta = 0.0                    # Initial horizontal angle in radians
 initial_phi = 1.57                     # Initial vertical angle in radians (pi/2 = 90 degrees)
+smoothing_factor = 0.8                 # Camera smoothing factor (0.1-1.0, higher is faster)
 
 [view]
 # Default view settings
@@ -53,15 +54,15 @@ rim_light_elevation = 10.0             # Elevation angle in degrees
 [wireframe]
 # Wireframe overlay settings
 default_thickness = 0.0                # Default wireframe thickness (0.0 = off)
-color_dark_bg = [120, 120, 120, 255]   # Medium grey wireframe for dark backgrounds
-color_light_bg = [60, 60, 60, 255]     # Dark grey wireframe for light backgrounds
+color_dark_bg = [60, 60, 60, 255]   # Medium grey wireframe for dark backgrounds
+color_light_bg = [20, 20, 20, 255]     # Dark grey wireframe for light backgrounds
 
 [performance]
 # Performance optimization settings
 # Note: Already optimized - uses raw RGBA transfer (no PNG encoding overhead)
 render_scale = 0.5                     # Resolution scale for rendering (0.1-1.0, lower = faster)
                                        # Rendered image is upscaled by Kitty protocol to full display size
-enable_shadows = false                 # Enable shadows from directional lights (costs performance)
+enable_shadows = true                  # Enable shadows from directional lights (costs performance)
 
 [keybindings]
 # Keybindings for controlling the viewer

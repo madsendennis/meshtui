@@ -88,8 +88,12 @@ class TestMain:
     @patch("meshtui.main.render_mesh")
     @patch("meshtui.main.load_mesh")
     @patch("meshtui.main.get_terminal_size")
+    @patch("meshtui.main.setup_tui")
+    @patch("meshtui.main.cleanup_tui")
     def test_render_error(
         self,
+        mock_cleanup: MagicMock,
+        mock_setup: MagicMock,
         mock_get_size: MagicMock,
         mock_load: MagicMock,
         mock_render: MagicMock,
@@ -108,8 +112,12 @@ class TestMain:
     @patch("meshtui.main.render_mesh")
     @patch("meshtui.main.load_mesh")
     @patch("meshtui.main.get_terminal_size")
+    @patch("meshtui.main.setup_tui")
+    @patch("meshtui.main.cleanup_tui")
     def test_display_error(
         self,
+        mock_cleanup: MagicMock,
+        mock_setup: MagicMock,
         mock_get_size: MagicMock,
         mock_load: MagicMock,
         mock_render: MagicMock,
@@ -143,8 +151,12 @@ class TestMain:
     @patch("meshtui.main.render_and_display")
     @patch("meshtui.main.load_mesh")
     @patch("meshtui.main.get_terminal_size")
+    @patch("meshtui.main.setup_tui")
+    @patch("meshtui.main.cleanup_tui")
     def test_mesh_info_displayed(
         self,
+        mock_cleanup: MagicMock,
+        mock_setup: MagicMock,
         mock_get_size: MagicMock,
         mock_load: MagicMock,
         mock_render_display: MagicMock,
