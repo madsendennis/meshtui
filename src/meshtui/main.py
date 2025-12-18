@@ -25,6 +25,42 @@ _CAMERA_CONFIG = config.get_camera_config()
 _VIEW_CONFIG = config.get_view_config()
 _WIREFRAME_CONFIG = config.get_wireframe_config()
 _ORBITAL_CONFIG = config.get_orbital_camera_config()
+_KEYBINDINGS_CONFIG = config.get_keybindings_config()
+
+# Special key mappings for raw terminal input
+_SPECIAL_KEYS = {
+    "esc": "\x1b",
+    "space": " ",
+    "tab": "\t",
+    "enter": "\r",
+    "backspace": "\x7f",
+    # Add more if needed, like ctrl combinations
+}
+
+
+class KeyDispatcher:
+    """Handles keybinding dispatch for configurable input."""
+
+    def __init__(self, keybindings: dict[str, Any]):
+        self.key_to_action: dict[str, str] = {}
+        self._build_key_map(keybindings)
+
+    def _build_key_map(self, keybindings: dict[str, Any]) -> None:
+        """Build the key to action mapping from config."""
+        for action, keys in keybindings.items():
+            if isinstance(keys, str):
+                keys = [keys]
+            elif not isinstance(keys, list):
+                continue  # Skip invalid entries
+
+            for key in keys:
+                key_code = _SPECIAL_KEYS.get(key, key)
+                self.key_to_action[key_code] = action
+
+    def get_action(self, key: str) -> str | None:
+        """Get the action for a given key press."""
+        return self.key_to_action.get(key)
+
 
 # Global state for handling terminal resize
 _current_mesh: trimesh.Trimesh | None = None
@@ -42,6 +78,307 @@ _last_image_data: bytes | None = None
 # Load up vector list from config (index 0 is the default)
 _UP_VECTORS: list[tuple[float, float, float]] = [tuple(v) for v in _VIEW_CONFIG["up_vectors"]]
 
+
+# Action functions for key dispatcher
+def action_quit() -> bool:
+    """Quit the application."""
+    sys.exit(0)
+
+
+def action_view_minus_x() -> bool:
+    global _view_axis, _orbital_active, _up_vector_override, _up_vector_cycle_index
+    _view_axis = "-x"
+    _orbital_active = False
+    _up_vector_override = _get_default_up_vector_for_axis("-x")
+    _up_vector_cycle_index = -1
+    return True
+
+
+def action_view_plus_x() -> bool:
+    global _view_axis, _orbital_active, _up_vector_override, _up_vector_cycle_index
+    _view_axis = "+x"
+    _orbital_active = False
+    _up_vector_override = _get_default_up_vector_for_axis("+x")
+    _up_vector_cycle_index = -1
+    return True
+
+
+def action_view_minus_y() -> bool:
+    global _view_axis, _orbital_active, _up_vector_override, _up_vector_cycle_index
+    _view_axis = "-y"
+    _orbital_active = False
+    _up_vector_override = _get_default_up_vector_for_axis("-y")
+    _up_vector_cycle_index = -1
+    return True
+
+
+def action_view_plus_y() -> bool:
+    global _view_axis, _orbital_active, _up_vector_override, _up_vector_cycle_index
+    _view_axis = "+y"
+    _orbital_active = False
+    _up_vector_override = _get_default_up_vector_for_axis("+y")
+    _up_vector_cycle_index = -1
+    return True
+
+
+def action_view_minus_z() -> bool:
+    global _view_axis, _orbital_active, _up_vector_override, _up_vector_cycle_index
+    _view_axis = "-z"
+    _orbital_active = False
+    _up_vector_override = _get_default_up_vector_for_axis("-z")
+    _up_vector_cycle_index = -1
+    return True
+
+
+def action_view_plus_z() -> bool:
+    global _view_axis, _orbital_active, _up_vector_override, _up_vector_cycle_index
+    _view_axis = "+z"
+    _orbital_active = False
+    _up_vector_override = _get_default_up_vector_for_axis("+z")
+    _up_vector_cycle_index = -1
+    return True
+
+
+def action_wireframe_off() -> bool:
+    global _wireframe_thickness
+    _wireframe_thickness = 0.0
+    return True
+
+
+def action_wireframe_increase() -> bool:
+    global _wireframe_thickness
+    if _wireframe_thickness == 0.0:
+        _wireframe_thickness = 1.0
+    else:
+        _wireframe_thickness += 1.0
+    return True
+
+
+def action_toggle_camera_type() -> bool:
+    global _camera_type
+    _camera_type = "orthographic" if _camera_type == "perspective" else "perspective"
+    return True
+
+
+def action_light_decrease() -> bool:
+    global _light_intensity
+    _light_intensity = max(0.1, _light_intensity - 0.5)
+    return True
+
+
+def action_light_increase() -> bool:
+    global _light_intensity
+    _light_intensity = min(10.0, _light_intensity + 0.5)
+    return True
+
+
+def action_up_vector_next() -> bool:
+    global _up_vector_cycle_index, _up_vector_override
+    if _up_vector_cycle_index == -1:
+        _up_vector_cycle_index = 0
+    else:
+        _up_vector_cycle_index = (_up_vector_cycle_index + 1) % len(_UP_VECTORS)
+    _up_vector_override = _UP_VECTORS[_up_vector_cycle_index]
+    return True
+
+
+def action_up_vector_prev() -> bool:
+    global _up_vector_cycle_index, _up_vector_override
+    if _up_vector_cycle_index == -1:
+        _up_vector_cycle_index = len(_UP_VECTORS) - 1
+    else:
+        _up_vector_cycle_index = (_up_vector_cycle_index - 1) % len(_UP_VECTORS)
+    _up_vector_override = _UP_VECTORS[_up_vector_cycle_index]
+    return True
+
+
+def action_help_toggle() -> bool:
+    global _show_help
+    _show_help = not _show_help
+    return True
+
+
+def action_help_close() -> bool | str:
+    global _show_help
+    if _show_help:
+        _show_help = False
+        return "force_redraw"
+    return False
+
+
+def action_orbit_left() -> bool:
+    global _orbital_active, _orbital_theta
+    if not _orbital_active:
+        if _current_mesh is not None:
+            _initialize_orbital_camera(_current_mesh)
+        _initialize_orbital_from_view_axis(_view_axis)
+    _orbital_active = True
+    _orbital_theta -= _ORBITAL_CONFIG["movement_speed"]
+    return True
+
+
+def action_orbit_right() -> bool:
+    global _orbital_active, _orbital_theta
+    if not _orbital_active:
+        if _current_mesh is not None:
+            _initialize_orbital_camera(_current_mesh)
+        _initialize_orbital_from_view_axis(_view_axis)
+    _orbital_active = True
+    _orbital_theta += _ORBITAL_CONFIG["movement_speed"]
+    return True
+
+
+def action_orbit_down() -> bool:
+    global _orbital_active, _orbital_phi
+    if not _orbital_active:
+        if _current_mesh is not None:
+            _initialize_orbital_camera(_current_mesh)
+        _initialize_orbital_from_view_axis(_view_axis)
+    _orbital_active = True
+    _orbital_phi += _ORBITAL_CONFIG["movement_speed"]
+    _orbital_phi = max(0.1, min(math.pi - 0.1, _orbital_phi))
+    return True
+
+
+def action_orbit_up() -> bool:
+    global _orbital_active, _orbital_phi
+    if not _orbital_active:
+        if _current_mesh is not None:
+            _initialize_orbital_camera(_current_mesh)
+        _initialize_orbital_from_view_axis(_view_axis)
+    _orbital_active = True
+    _orbital_phi -= _ORBITAL_CONFIG["movement_speed"]
+    _orbital_phi = max(0.1, min(math.pi - 0.1, _orbital_phi))
+    return True
+
+
+def action_orbit_left_fast() -> bool:
+    global _orbital_active, _orbital_theta
+    if not _orbital_active:
+        if _current_mesh is not None:
+            _initialize_orbital_camera(_current_mesh)
+        _initialize_orbital_from_view_axis(_view_axis)
+    _orbital_active = True
+    _orbital_theta -= (
+        _ORBITAL_CONFIG["movement_speed"] * _ORBITAL_CONFIG["movement_speed_fast_multiplier"]
+    )
+    return True
+
+
+def action_orbit_right_fast() -> bool:
+    global _orbital_active, _orbital_theta
+    if not _orbital_active:
+        if _current_mesh is not None:
+            _initialize_orbital_camera(_current_mesh)
+        _initialize_orbital_from_view_axis(_view_axis)
+    _orbital_active = True
+    _orbital_theta += (
+        _ORBITAL_CONFIG["movement_speed"] * _ORBITAL_CONFIG["movement_speed_fast_multiplier"]
+    )
+    return True
+
+
+def action_orbit_down_fast() -> bool:
+    global _orbital_active, _orbital_phi
+    if not _orbital_active:
+        if _current_mesh is not None:
+            _initialize_orbital_camera(_current_mesh)
+        _initialize_orbital_from_view_axis(_view_axis)
+    _orbital_active = True
+    _orbital_phi += (
+        _ORBITAL_CONFIG["movement_speed"] * _ORBITAL_CONFIG["movement_speed_fast_multiplier"]
+    )
+    _orbital_phi = max(0.1, min(math.pi - 0.1, _orbital_phi))
+    return True
+
+
+def action_orbit_up_fast() -> bool:
+    global _orbital_active, _orbital_phi
+    if not _orbital_active:
+        if _current_mesh is not None:
+            _initialize_orbital_camera(_current_mesh)
+        _initialize_orbital_from_view_axis(_view_axis)
+    _orbital_active = True
+    _orbital_phi -= (
+        _ORBITAL_CONFIG["movement_speed"] * _ORBITAL_CONFIG["movement_speed_fast_multiplier"]
+    )
+    _orbital_phi = max(0.1, min(math.pi - 0.1, _orbital_phi))
+    return True
+
+
+def action_zoom_in() -> bool:
+    global _orbital_active, _camera_type, _orbital_radius, _ortho_zoom
+    if not _orbital_active:
+        if _current_mesh is not None:
+            _initialize_orbital_camera(_current_mesh)
+        _initialize_orbital_from_view_axis(_view_axis)
+    _orbital_active = True
+    if _camera_type == "orthographic":
+        _ortho_zoom *= _ORBITAL_CONFIG["zoom_in_factor"]
+    else:
+        _orbital_radius *= _ORBITAL_CONFIG["zoom_in_factor"]
+    return True
+
+
+def action_zoom_out() -> bool:
+    global _orbital_active, _camera_type, _orbital_radius, _ortho_zoom
+    if not _orbital_active:
+        if _current_mesh is not None:
+            _initialize_orbital_camera(_current_mesh)
+        _initialize_orbital_from_view_axis(_view_axis)
+    _orbital_active = True
+    if _camera_type == "orthographic":
+        _ortho_zoom *= _ORBITAL_CONFIG["zoom_out_factor"]
+    else:
+        _orbital_radius *= _ORBITAL_CONFIG["zoom_out_factor"]
+    return True
+
+
+def action_reset_orbital() -> bool:
+    global _orbital_active, _orbital_theta, _orbital_phi, _orbital_radius, _orbital_initial_radius
+    _orbital_active = False
+    _orbital_theta = _ORBITAL_CONFIG["initial_theta"]
+    _orbital_phi = _ORBITAL_CONFIG["initial_phi"]
+    _orbital_radius = _orbital_initial_radius
+    if _current_mesh is not None:
+        _initialize_orbital_camera(_current_mesh)
+    return True
+
+
+# Action dispatcher
+_ACTION_DISPATCH = {
+    "quit": action_quit,
+    "view_minus_x": action_view_minus_x,
+    "view_plus_x": action_view_plus_x,
+    "view_minus_y": action_view_minus_y,
+    "view_plus_y": action_view_plus_y,
+    "view_minus_z": action_view_minus_z,
+    "view_plus_z": action_view_plus_z,
+    "wireframe_off": action_wireframe_off,
+    "wireframe_increase": action_wireframe_increase,
+    "toggle_camera_type": action_toggle_camera_type,
+    "light_decrease": action_light_decrease,
+    "light_increase": action_light_increase,
+    "up_vector_next": action_up_vector_next,
+    "up_vector_prev": action_up_vector_prev,
+    "help_toggle": action_help_toggle,
+    "help_close": action_help_close,
+    "orbit_left": action_orbit_left,
+    "orbit_right": action_orbit_right,
+    "orbit_down": action_orbit_down,
+    "orbit_up": action_orbit_up,
+    "orbit_left_fast": action_orbit_left_fast,
+    "orbit_right_fast": action_orbit_right_fast,
+    "orbit_down_fast": action_orbit_down_fast,
+    "orbit_up_fast": action_orbit_up_fast,
+    "zoom_in": action_zoom_in,
+    "zoom_out": action_zoom_out,
+    "reset_orbital": action_reset_orbital,
+}
+
+# Initialize key dispatcher
+_key_dispatcher = KeyDispatcher(_KEYBINDINGS_CONFIG)
+
 # Camera position tracking
 _camera_position: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
@@ -52,6 +389,11 @@ _orbital_phi: float = _ORBITAL_CONFIG["initial_phi"]  # Vertical angle (elevatio
 _orbital_radius: float = 1.0  # Distance from target (will be initialized from AABB)
 _orbital_target: tuple[float, float, float] = (0.0, 0.0, 0.0)  # Mesh center (AABB center)
 _orbital_initial_radius: float = 1.0  # Store initial radius for reset
+_ortho_zoom: float = 1.0  # Orthographic camera zoom factor (smaller = more zoomed in)
+
+# Lighting state
+_LIGHTING_CONFIG = config.get_lighting_config()
+_light_intensity: float = _LIGHTING_CONFIG["key_light_intensity"]  # Main light intensity
 
 
 def _get_default_up_vector_for_axis(view_axis: str) -> tuple[float, float, float]:
@@ -90,15 +432,22 @@ def _format_vec3(v: tuple[float, float, float]) -> str:
 
 
 def _spherical_to_cartesian(
-    theta: float, phi: float, radius: float, target: tuple[float, float, float]
+    theta: float,
+    phi: float,
+    radius: float,
+    target: tuple[float, float, float],
+    up: tuple[float, float, float],
 ) -> tuple[float, float, float]:
     """Convert spherical coordinates to Cartesian camera position.
 
+    Supports Y-up and Z-up coordinate systems based on the up vector.
+
     Args:
         theta: Horizontal angle (azimuth) in radians
-        phi: Vertical angle (elevation) in radians
+        phi: Polar angle from the up axis in radians (0 to π)
         radius: Distance from target
         target: The center point (x, y, z) to orbit around
+        up: Up vector, (0,1,0) for Y-up, (0,0,1) for Z-up
 
     Returns:
         Camera position (x, y, z) in Cartesian coordinates
@@ -107,10 +456,24 @@ def _spherical_to_cartesian(
 
     target_x, target_y, target_z = target
 
-    # Spherical to Cartesian conversion
-    x = target_x + radius * math.sin(phi) * math.cos(theta)
-    y = target_y + radius * math.cos(phi)
-    z = target_z + radius * math.sin(phi) * math.sin(theta)
+    sin_phi = math.sin(phi)
+    cos_phi = math.cos(phi)
+    cos_theta = math.cos(theta)
+    sin_theta = math.sin(theta)
+
+    if up == (0.0, 1.0, 0.0):  # Y-up
+        x = target_x + radius * sin_phi * cos_theta
+        y = target_y + radius * cos_phi
+        z = target_z + radius * sin_phi * sin_theta
+    elif up == (0.0, 0.0, 1.0):  # Z-up
+        x = target_x + radius * sin_phi * cos_theta
+        y = target_y + radius * sin_phi * sin_theta
+        z = target_z + radius * cos_phi
+    else:
+        # Default to Y-up
+        x = target_x + radius * sin_phi * cos_theta
+        y = target_y + radius * cos_phi
+        z = target_z + radius * sin_phi * sin_theta
 
     return (x, y, z)
 
@@ -147,8 +510,11 @@ def _initialize_orbital_camera(mesh: trimesh.Trimesh) -> None:
     _orbital_initial_radius = distance
 
 
-def _sync_orbital_from_camera() -> None:
-    """Synchronize orbital state from current camera position."""
+def _sync_orbital_from_camera(up: tuple[float, float, float]) -> None:
+    """Synchronize orbital state from current camera position.
+
+    Uses the specified up vector to determine the coordinate system.
+    """
     global _orbital_theta, _orbital_phi, _orbital_radius
 
     import math
@@ -165,17 +531,67 @@ def _sync_orbital_from_camera() -> None:
     if r < 1e-6:
         r = 1.0
 
-    # Phi (angle from +Y)
-    # Clamp for acos safety
-    cos_phi = max(-1.0, min(1.0, dy / r))
-    phi = math.acos(cos_phi)
-
-    # Theta (angle in XZ plane)
-    theta = math.atan2(dz, dx)
+    if up == (0.0, 1.0, 0.0):  # Y-up
+        # Phi is angle from Y-axis (0 = +Y, π/2 = XZ plane, π = -Y)
+        # Theta is angle in XZ plane (azimuth)
+        cos_phi = max(-1.0, min(1.0, dy / r))
+        phi = math.acos(cos_phi)
+        theta = math.atan2(dz, dx)
+    elif up == (0.0, 0.0, 1.0):  # Z-up
+        # Phi is angle from Z-axis (0 = +Z, π/2 = XY plane, π = -Z)
+        # Theta is angle in XY plane (azimuth)
+        cos_phi = max(-1.0, min(1.0, dz / r))
+        phi = math.acos(cos_phi)
+        theta = math.atan2(dy, dx)
+    else:
+        # Default to Y-up
+        cos_phi = max(-1.0, min(1.0, dy / r))
+        phi = math.acos(cos_phi)
+        theta = math.atan2(dz, dx)
 
     _orbital_radius = r
     _orbital_phi = phi
     _orbital_theta = theta
+
+
+def _initialize_orbital_from_view_axis(view_axis: str) -> None:
+    """Initialize orbital state from a view axis.
+
+    Maps axis views to appropriate orbital coordinates for Y-up system.
+    """
+    global _orbital_theta, _orbital_phi
+
+    import math
+
+    axis = view_axis.lower()
+    if axis == "+z":
+        # Camera at +Z looking toward -Z: phi = π/2, theta = π/2
+        _orbital_theta = math.pi / 2.0
+        _orbital_phi = math.pi / 2.0
+    elif axis == "-z":
+        # Camera at -Z looking toward +Z: phi = -π/2, theta = π/2
+        _orbital_theta = math.pi / 2.0
+        _orbital_phi = -math.pi / 2.0
+    elif axis == "+x":
+        # Camera at +X looking toward -X: phi = π/2, theta = 0
+        _orbital_theta = 0.0
+        _orbital_phi = math.pi / 2.0
+    elif axis == "-x":
+        # Camera at -X looking toward +X: phi = π/2, theta = π
+        _orbital_theta = math.pi
+        _orbital_phi = math.pi / 2.0
+    elif axis == "+y":
+        # Camera at +Y looking toward -Y: phi = π/2, theta = π/2
+        _orbital_theta = math.pi / 2.0
+        _orbital_phi = math.pi / 2.0
+    elif axis == "-y":
+        # Camera at -Y looking toward +Y: phi = π/2, theta = -π/2
+        _orbital_theta = -math.pi / 2.0
+        _orbital_phi = math.pi / 2.0
+    else:
+        # Default to -z view
+        _orbital_theta = -math.pi / 2.0
+        _orbital_phi = math.pi / 2.0
 
 
 def handle_resize(signum: int, frame: Any) -> None:
@@ -206,7 +622,7 @@ def draw_interface(cols: int, rows: int, mesh: trimesh.Trimesh | None = None) ->
         cam_type_text = f"Persp ({_CAMERA_CONFIG['fov_degrees']}°)"
 
     left_text = (
-        f" q: Quit | ?: Help | c/C: {cam_type_text} | u/U: Up {up_text} | Cam {cam_pos_text}"
+        f" q: Quit | ?: Help | w/W: {cam_type_text} | u/U: Up {up_text} | Cam {cam_pos_text}"
     )
 
     right_text = ""
@@ -245,11 +661,11 @@ def draw_help_menu(cols: int, rows: int) -> None:
     # Content
     lines = [
         "Controls:",
-        "  x/X : View from +/- X axis",
-        "  y/Y : View from +/- Y axis",
-        "  z/Z : View from +/- Z axis",
+        "  x/X : View from -/+ X axis",
+        "  y/Y : View from -/+ Y axis",
+        "  z/Z : View from -/+ Z axis",
         f"  u/U : Cycle camera Up vector (current {up_text})",
-        "  c/C : Toggle Perspective/Orthographic camera",
+        "  w/W : Toggle Perspective/Orthographic camera",
         "",
         "Orbital Camera (vim-style):",
         "  h/l : Orbit Left/Right",
@@ -258,6 +674,7 @@ def draw_help_menu(cols: int, rows: int) -> None:
         "  r/R : Zoom In/Out",
         "  0   : Reset camera to default view",
         "",
+        "  i/I : Light Intensity Down/Up",
         "  G   : Grid ON (wireframe)",
         "  g   : Grid OFF (solid)",
         "  ?   : Toggle this help menu",
@@ -360,20 +777,23 @@ def render_and_display(
             "wireframe": _wireframe_thickness,
             "up": _up_vector_override,
             "camera_type": _camera_type,
+            "light_intensity": _light_intensity,
             "orbital_active": _orbital_active,
             "orbital_theta": _orbital_theta,
             "orbital_phi": _orbital_phi,
             "orbital_radius": _orbital_radius,
+            "ortho_zoom": _ortho_zoom,
         }
 
         if current_params != _last_render_params or _last_image_data is None:
-            # Always pass effective up vector (config default or user-cycled)
-            effective_up = _effective_up_vector(_view_axis, _up_vector_override)
-
             # Use orbital camera if active
             if _orbital_active:
+                # Use the current up vector override if set, otherwise default to Y-up
+                effective_up = (
+                    _up_vector_override if _up_vector_override is not None else (0.0, 1.0, 0.0)
+                )
                 eye = _spherical_to_cartesian(
-                    _orbital_theta, _orbital_phi, _orbital_radius, _orbital_target
+                    _orbital_theta, _orbital_phi, _orbital_radius, _orbital_target, effective_up
                 )
                 image_data, cam_pos = render_mesh(
                     mesh,
@@ -385,8 +805,12 @@ def render_and_display(
                     orbital_eye=eye,
                     orbital_target=_orbital_target,
                     camera_type=_camera_type,
+                    light_intensity=_light_intensity,
+                    ortho_zoom=_ortho_zoom,
                 )
             else:
+                # For axis views, use the appropriate up vector
+                effective_up = _effective_up_vector(_view_axis, _up_vector_override)
                 image_data, cam_pos = render_mesh(
                     mesh,
                     render_width,
@@ -395,6 +819,8 @@ def render_and_display(
                     wireframe_thickness=_wireframe_thickness,
                     up_vector_override=effective_up,
                     camera_type=_camera_type,
+                    light_intensity=_light_intensity,
+                    ortho_zoom=_ortho_zoom,
                 )
             _last_image_data = image_data
             _camera_position = cam_pos
@@ -450,10 +876,12 @@ def wait_for_exit() -> None:
     global _view_axis
     global _wireframe_thickness
     global _camera_type
+    global _light_intensity
     global _orbital_active
     global _orbital_theta
     global _orbital_phi
     global _orbital_radius
+    global _ortho_zoom
 
     if not sys.stdin.isatty():
         return
@@ -478,193 +906,12 @@ def wait_for_exit() -> None:
                 while select.select([sys.stdin], [], [], 0.0)[0]:
                     char = sys.stdin.read(1)
 
-                    if char == "q":
-                        return  # Exit immediately
-                    elif char == "x":
-                        _view_axis = "+x"
-                        _orbital_active = False
-                        _up_vector_override = _get_default_up_vector_for_axis("+x")
-                        _up_vector_cycle_index = -1  # Reset cycle index
-                        needs_rerender = True
-                    elif char == "X":
-                        _view_axis = "-x"
-                        _orbital_active = False
-                        _up_vector_override = _get_default_up_vector_for_axis("-x")
-                        _up_vector_cycle_index = -1  # Reset cycle index
-                        needs_rerender = True
-                    elif char == "y":
-                        _view_axis = "+y"
-                        _orbital_active = False
-                        _up_vector_override = _get_default_up_vector_for_axis("+y")
-                        _up_vector_cycle_index = -1  # Reset cycle index
-                        needs_rerender = True
-                    elif char == "Y":
-                        _view_axis = "-y"
-                        _orbital_active = False
-                        _up_vector_override = _get_default_up_vector_for_axis("-y")
-                        _up_vector_cycle_index = -1  # Reset cycle index
-                        needs_rerender = True
-                    elif char == "z":
-                        _view_axis = "+z"
-                        _orbital_active = False
-                        _up_vector_override = _get_default_up_vector_for_axis("+z")
-                        _up_vector_cycle_index = -1  # Reset cycle index
-                        needs_rerender = True
-                    elif char == "Z":
-                        _view_axis = "-z"
-                        _orbital_active = False
-                        _up_vector_override = _get_default_up_vector_for_axis("-z")
-                        _up_vector_cycle_index = -1  # Reset cycle index
-                        needs_rerender = True
-                    elif char == "G":
-                        if _wireframe_thickness == 0.0:
-                            _wireframe_thickness = 1.0
-                        else:
-                            _wireframe_thickness += 1.0
-                        needs_rerender = True
-                    elif char == "g":
-                        _wireframe_thickness = 0.0
-                        needs_rerender = True
-                    elif char in ["c", "C"]:
-                        if _camera_type == "perspective":
-                            _camera_type = "orthographic"
-                        else:
-                            _camera_type = "perspective"
-                        needs_rerender = True
-                    elif char == "u":
-                        if _up_vector_cycle_index == -1:
-                            _up_vector_cycle_index = 0
-                        else:
-                            _up_vector_cycle_index = (_up_vector_cycle_index + 1) % len(_UP_VECTORS)
-                        _up_vector_override = _UP_VECTORS[_up_vector_cycle_index]
-                        needs_rerender = True
-                    elif char == "U":
-                        if _up_vector_cycle_index == -1:
-                            _up_vector_cycle_index = len(_UP_VECTORS) - 1
-                        else:
-                            _up_vector_cycle_index = (_up_vector_cycle_index - 1) % len(_UP_VECTORS)
-                        _up_vector_override = _UP_VECTORS[_up_vector_cycle_index]
-                        needs_rerender = True
-                    elif char == "?":
-                        was_showing_help = _show_help
-                        _show_help = not _show_help
-                        needs_rerender = True
-                        # Force redraw when closing help to clear the menu text
-                        if was_showing_help and not _show_help:
-                            needs_rerender = "force_redraw"
-                    elif char == "\x1b" and _show_help:  # Esc
-                        _show_help = False
-                        needs_rerender = "force_redraw"  # Force redraw to clear help menu
-                    # Orbital camera controls
-                    elif char == "h":  # Orbit left (decrease theta)
-                        if not _orbital_active:
-                            if _current_mesh is not None:
-                                _initialize_orbital_camera(_current_mesh)
-                            _sync_orbital_from_camera()
-                        _orbital_active = True
-                        _orbital_theta -= _ORBITAL_CONFIG["movement_speed"]
-                        needs_rerender = True
-                    elif char == "l":  # Orbit right (increase theta)
-                        if not _orbital_active:
-                            if _current_mesh is not None:
-                                _initialize_orbital_camera(_current_mesh)
-                            _sync_orbital_from_camera()
-                        _orbital_active = True
-                        _orbital_theta += _ORBITAL_CONFIG["movement_speed"]
-                        needs_rerender = True
-                    elif char == "j":  # Orbit down (increase phi)
-                        if not _orbital_active:
-                            if _current_mesh is not None:
-                                _initialize_orbital_camera(_current_mesh)
-                            _sync_orbital_from_camera()
-                        _orbital_active = True
-                        _orbital_phi += _ORBITAL_CONFIG["movement_speed"]
-                        # Clamp phi to avoid gimbal lock
-                        _orbital_phi = max(0.1, min(math.pi - 0.1, _orbital_phi))
-                        needs_rerender = True
-                    elif char == "k":  # Orbit up (decrease phi)
-                        if not _orbital_active:
-                            if _current_mesh is not None:
-                                _initialize_orbital_camera(_current_mesh)
-                            _sync_orbital_from_camera()
-                        _orbital_active = True
-                        _orbital_phi -= _ORBITAL_CONFIG["movement_speed"]
-                        # Clamp phi to avoid gimbal lock
-                        _orbital_phi = max(0.1, min(math.pi - 0.1, _orbital_phi))
-                        needs_rerender = True
-                    elif char == "H":  # Orbit left fast
-                        if not _orbital_active:
-                            if _current_mesh is not None:
-                                _initialize_orbital_camera(_current_mesh)
-                            _sync_orbital_from_camera()
-                        _orbital_active = True
-                        _orbital_theta -= (
-                            _ORBITAL_CONFIG["movement_speed"]
-                            * _ORBITAL_CONFIG["movement_speed_fast_multiplier"]
-                        )
-                        needs_rerender = True
-                    elif char == "L":  # Orbit right fast
-                        if not _orbital_active:
-                            if _current_mesh is not None:
-                                _initialize_orbital_camera(_current_mesh)
-                            _sync_orbital_from_camera()
-                        _orbital_active = True
-                        _orbital_theta += (
-                            _ORBITAL_CONFIG["movement_speed"]
-                            * _ORBITAL_CONFIG["movement_speed_fast_multiplier"]
-                        )
-                        needs_rerender = True
-                    elif char == "J":  # Orbit down fast
-                        if not _orbital_active:
-                            if _current_mesh is not None:
-                                _initialize_orbital_camera(_current_mesh)
-                            _sync_orbital_from_camera()
-                        _orbital_active = True
-                        _orbital_phi += (
-                            _ORBITAL_CONFIG["movement_speed"]
-                            * _ORBITAL_CONFIG["movement_speed_fast_multiplier"]
-                        )
-                        # Clamp phi to avoid gimbal lock
-                        _orbital_phi = max(0.1, min(math.pi - 0.1, _orbital_phi))
-                        needs_rerender = True
-                    elif char == "K":  # Orbit up fast
-                        if not _orbital_active:
-                            if _current_mesh is not None:
-                                _initialize_orbital_camera(_current_mesh)
-                            _sync_orbital_from_camera()
-                        _orbital_active = True
-                        _orbital_phi -= (
-                            _ORBITAL_CONFIG["movement_speed"]
-                            * _ORBITAL_CONFIG["movement_speed_fast_multiplier"]
-                        )
-                        # Clamp phi to avoid gimbal lock
-                        _orbital_phi = max(0.1, min(math.pi - 0.1, _orbital_phi))
-                        needs_rerender = True
-                    elif char == "r":  # Zoom in
-                        if not _orbital_active:
-                            if _current_mesh is not None:
-                                _initialize_orbital_camera(_current_mesh)
-                            _sync_orbital_from_camera()
-                        _orbital_active = True
-                        _orbital_radius *= _ORBITAL_CONFIG["zoom_in_factor"]
-                        needs_rerender = True
-                    elif char == "R":  # Zoom out
-                        if not _orbital_active:
-                            if _current_mesh is not None:
-                                _initialize_orbital_camera(_current_mesh)
-                            _sync_orbital_from_camera()
-                        _orbital_active = True
-                        _orbital_radius *= _ORBITAL_CONFIG["zoom_out_factor"]
-                        needs_rerender = True
-                    elif char == "0":  # Reset orbital camera
-                        _orbital_active = False
-                        _orbital_theta = _ORBITAL_CONFIG["initial_theta"]
-                        _orbital_phi = _ORBITAL_CONFIG["initial_phi"]
-                        _orbital_radius = _orbital_initial_radius
-                        # Re-initialize target from current mesh
-                        if _current_mesh is not None:
-                            _initialize_orbital_camera(_current_mesh)
-                        needs_rerender = True
+                    # Dispatch key to action
+                    action = _key_dispatcher.get_action(char)
+                    if action and action in _ACTION_DISPATCH:
+                        result = _ACTION_DISPATCH[action]()
+                        if result:
+                            needs_rerender = result
 
                 if needs_rerender and _current_mesh is not None:
                     # Handle force redraw (e.g., closing help menu)
@@ -716,7 +963,7 @@ def main() -> int:
     # Parse arguments
     if len(sys.argv) < 2:
         print("Usage: meshtui <mesh_file>", file=sys.stderr)
-        print("\nSupported formats: .ply, .stl", file=sys.stderr)
+        print("\nSupported formats: .ply, .stl, .obj, .drc, .glb", file=sys.stderr)
         return 1
 
     mesh_path = Path(sys.argv[1])

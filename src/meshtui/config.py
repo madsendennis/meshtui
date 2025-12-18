@@ -100,6 +100,11 @@ def get_orbital_camera_config() -> dict[str, Any]:
     return cast(dict[str, Any], _CONFIG["orbital_camera"])
 
 
+def get_keybindings_config() -> dict[str, Any]:
+    """Get keybindings configuration settings."""
+    return cast(dict[str, Any], _CONFIG["keybindings"])
+
+
 def get_performance_config() -> dict[str, Any]:
     """Get performance configuration settings."""
     return cast(dict[str, Any], _CONFIG["performance"])

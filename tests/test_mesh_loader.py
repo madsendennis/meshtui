@@ -44,7 +44,7 @@ class TestLoadMesh:
             patch.object(Path, "exists", return_value=True),
             pytest.raises(ValueError, match="Unsupported file format"),
         ):
-            load_mesh(Path("model.obj"))
+            load_mesh(Path("model.xyz"))
 
     def test_supports_ply_format(self) -> None:
         """Test that .ply files are supported."""
@@ -66,6 +66,39 @@ class TestLoadMesh:
             patch.object(Path, "exists", return_value=True),
         ):
             mesh = load_mesh(Path("model.stl"))
+            assert isinstance(mesh, trimesh.Trimesh)
+
+    def test_supports_obj_format(self) -> None:
+        """Test that .obj files are supported."""
+        cube = trimesh.creation.box()
+
+        with (
+            patch("trimesh.load", return_value=cube),
+            patch.object(Path, "exists", return_value=True),
+        ):
+            mesh = load_mesh(Path("model.obj"))
+            assert isinstance(mesh, trimesh.Trimesh)
+
+    def test_supports_drc_format(self) -> None:
+        """Test that .drc files are supported."""
+        cube = trimesh.creation.box()
+
+        with (
+            patch("trimesh.load", return_value=cube),
+            patch.object(Path, "exists", return_value=True),
+        ):
+            mesh = load_mesh(Path("model.drc"))
+            assert isinstance(mesh, trimesh.Trimesh)
+
+    def test_supports_glb_format(self) -> None:
+        """Test that .glb files are supported."""
+        cube = trimesh.creation.box()
+
+        with (
+            patch("trimesh.load", return_value=cube),
+            patch.object(Path, "exists", return_value=True),
+        ):
+            mesh = load_mesh(Path("model.glb"))
             assert isinstance(mesh, trimesh.Trimesh)
 
     def test_case_insensitive_extension(self) -> None:

@@ -14,8 +14,11 @@ MeshTUI is a Python application that allows you to view 3D meshes directly in yo
 # View a mesh file
 meshtui /path/to/meshfile.ply
 
-# Works with .stl files too
+# Works with .stl, .obj, .drc, and .glb files too
 meshtui model.stl
+meshtui model.obj
+meshtui model.drc
+meshtui model.glb
 ```
 
 The viewer will:
@@ -40,7 +43,7 @@ Press 'q', Esc, or Ctrl+C to exit. Terminal will auto-resize.
 ## Features (Phase 1)
 
 - 🖼️ Display 3D meshes in the terminal using Kitty graphics protocol
-- 📦 Support for .ply and .stl mesh formats
+- 📦 Support for .ply, .stl, .obj, .drc, and .glb mesh formats
 - 🎨 Automatic mesh centering and scaling
 - 🌓 Smart background detection (light/dark) with adaptive mesh coloring
 - 🔍 Transparent background that matches terminal theme
@@ -53,6 +56,9 @@ Press 'q', Esc, or Ctrl+C to exit. Terminal will auto-resize.
 
 - `.ply` - Polygon File Format (Stanford Triangle Format)
 - `.stl` - Stereolithography Format
+- `.obj` - Wavefront OBJ Format
+- `.drc` - Google Draco Compressed Format
+- `.glb` - glTF Binary Format
 
 ## Requirements
 

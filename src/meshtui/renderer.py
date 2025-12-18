@@ -1,31 +1,33 @@
-"""Mesh rendering using pyrender."""
-
-import contextlib
+"""Mesh rendering using pygfx with GPU acceleration."""
 
 import numpy as np
-import pyrender
+import pygfx as gfx
 import trimesh
-from OpenGL import GL
+from rendercanvas.offscreen import RenderCanvas
 
 from meshtui import config
 from meshtui.kitty_protocol import detect_terminal_background
 
 # Cache for the renderer to avoid recreating context
-_renderer: pyrender.OffscreenRenderer | None = None
-_renderer_size: tuple[int, int] = (0, 0)
+_renderer: gfx.renderers.WgpuRenderer | None = None
+_canvas: RenderCanvas | None = None
+_canvas_size: tuple[int, int] = (0, 0)
 
 
-def _get_renderer(width: int, height: int) -> pyrender.OffscreenRenderer:
-    """Get or create a cached renderer instance."""
-    global _renderer, _renderer_size
+def _get_renderer(width: int, height: int) -> tuple[gfx.renderers.WgpuRenderer, RenderCanvas]:
+    """Get or create a cached renderer instance with offscreen canvas."""
+    global _renderer, _canvas, _canvas_size
 
-    if _renderer is None or _renderer_size != (width, height):
-        if _renderer is not None:
-            _renderer.delete()
-        _renderer = pyrender.OffscreenRenderer(width, height)
-        _renderer_size = (width, height)
+    if _renderer is None or _canvas_size != (width, height):
+        if _canvas is not None:
+            _canvas.close()
 
-    return _renderer
+        # Create offscreen canvas with exact dimensions
+        _canvas = RenderCanvas(size=(width, height), pixel_ratio=1)
+        _renderer = gfx.renderers.WgpuRenderer(_canvas)
+        _canvas_size = (width, height)
+
+    return _renderer, _canvas
 
 
 def render_mesh(
@@ -38,6 +40,8 @@ def render_mesh(
     orbital_eye: tuple[float, float, float] | None = None,
     orbital_target: tuple[float, float, float] | None = None,
     camera_type: str = "orthographic",
+    light_intensity: float | None = None,
+    ortho_zoom: float = 1.0,
 ) -> tuple[bytes, tuple[float, float, float]]:
     """Render a mesh to raw RGBA image data.
 
@@ -55,6 +59,8 @@ def render_mesh(
         orbital_eye: Optional camera eye position for orbital mode
         orbital_target: Optional camera target position for orbital mode
         camera_type: Camera type ('perspective' or 'orthographic')
+        light_intensity: Key light intensity multiplier (default: 3.5)
+        ortho_zoom: Orthographic camera zoom factor (smaller = more zoomed in, default: 1.0)
 
     Returns:
         Tuple of (Raw RGBA image data as bytes, camera position as (x, y, z))
@@ -70,6 +76,11 @@ def render_mesh(
     scene_cfg = config.get_scene_config()
     material_cfg = config.get_material_config()
     lighting_cfg = config.get_lighting_config()
+    camera_cfg = config.get_camera_config()
+
+    # Use config default if light intensity not provided
+    if light_intensity is None:
+        light_intensity = lighting_cfg["key_light_intensity"]
 
     # Detect terminal background to choose appropriate colors
     is_light_bg = detect_terminal_background()
@@ -82,329 +93,242 @@ def render_mesh(
         wireframe_color = wireframe_cfg["color_dark_bg"]
         bg_color = scene_cfg["bg_color_dark"]
 
-    # Create a copy of the mesh
-    mesh = mesh.copy()
+    # Create scene
+    scene = gfx.Scene()
 
-    # Create PBR metallic-roughness material from config
-    pbr_material = pyrender.MetallicRoughnessMaterial(
-        baseColorFactor=material_cfg["base_color"],
-        metallicFactor=material_cfg["metallic_factor"],
-        roughnessFactor=material_cfg["roughness_factor"],
-        alphaMode="OPAQUE",
-        doubleSided=False,
+    # Add background with transparency
+    bg_color_normalized = tuple(c / 255.0 if i < 3 else c for i, c in enumerate(bg_color))
+    background = gfx.Background.from_color(bg_color_normalized)
+    scene.add(background)
+
+    # Convert trimesh to pygfx geometry
+    positions = mesh.vertices.astype(np.float32)
+    indices = mesh.faces.astype(np.uint32)
+
+    # Compute normals using trimesh (requires scipy for weighted vertex normals)
+    if hasattr(mesh, "vertex_normals"):
+        normals = mesh.vertex_normals.astype(np.float32)
+    else:
+        normals = np.zeros_like(positions)
+
+    geometry = gfx.Geometry(
+        positions=positions,
+        indices=indices,
+        normals=normals,
     )
 
-    # Create pyrender mesh with PBR material and smooth shading
-    mesh_pr = pyrender.Mesh.from_trimesh(mesh, material=pbr_material, smooth=True)
+    # Create material for solid mesh
+    base_color = tuple(material_cfg["base_color"])
+    material = gfx.MeshPhongMaterial(
+        color=base_color,
+        shininess=int((1.0 - material_cfg["roughness_factor"]) * 100),
+    )
 
-    # Create scene with ambient light and background from config
-    scene = pyrender.Scene(ambient_light=scene_cfg["ambient_light"], bg_color=bg_color)
-    scene.add(mesh_pr)
+    # Create solid mesh object
+    mesh_obj = gfx.Mesh(geometry, material)
+    scene.add(mesh_obj)
 
-    # Add wireframe if requested
+    # Add wireframe overlay if requested
     if wireframe_thickness > 0.0:
-        # Get unique edges for wireframe
-        edges = mesh.edges_unique
-        lines = mesh.vertices[edges]
-
-        # Create line segments
-        # Flatten lines array for pyrender Primitive
-        positions = lines.reshape(-1, 3)
-
-        # Create primitive for lines
-        wireframe = pyrender.Primitive(
-            positions=positions,
-            mode=1,  # GL_LINES
-            color_0=wireframe_color,
+        wireframe_color_normalized = tuple(
+            c / 255.0 if i < 3 else c for i, c in enumerate(wireframe_color)
         )
+        wireframe_material = gfx.MeshBasicMaterial(
+            color=wireframe_color_normalized,
+            wireframe=True,
+            wireframe_thickness=wireframe_thickness,
+        )
+        wireframe_obj = gfx.Mesh(geometry, wireframe_material)
+        scene.add(wireframe_obj)
 
-        # Add wireframe mesh to scene
-        wireframe_mesh = pyrender.Mesh([wireframe])
-        scene.add(wireframe_mesh)
-
-    # Set up camera
-    camera_cfg = config.get_camera_config()
-    aspect_ratio = width / height
-
-    if camera_type == "orthographic":
-        # Calculate magnification to fit mesh
-        bounds = mesh.bounds
-        extents = bounds[1] - bounds[0]
-        max_extent = float(np.max(extents)) * camera_cfg["distance_padding"]
-
-        # We want to fit max_extent in the view.
-        # If aspect_ratio > 1, height is the limiting factor for ymag
-        # If aspect_ratio < 1, width is the limiting factor for xmag
-        if aspect_ratio > 1.0:
-            ymag = max_extent / 2.0
-            xmag = ymag * aspect_ratio
-        else:
-            xmag = max_extent / 2.0
-            ymag = xmag / aspect_ratio
-
-        camera = pyrender.OrthographicCamera(xmag=xmag, ymag=ymag)
-        # For pose calculation, we still need a dummy FOV
-        yfov = np.pi / 3.0
-    else:
-        fov_radians = np.radians(camera_cfg["fov_degrees"])
-        camera = pyrender.PerspectiveCamera(yfov=fov_radians, aspectRatio=aspect_ratio)
-        yfov = camera.yfov
-
-    camera_node = scene.add(camera)
+    # Calculate camera position and setup
+    bounds = mesh.bounds
+    center = (bounds[0] + bounds[1]) / 2.0
+    extents = bounds[1] - bounds[0]
+    max_extent = float(np.max(extents))
 
     # Use orbital camera if eye and target are provided
     if orbital_eye is not None and orbital_target is not None:
-        # Use provided up vector or fallback
-        if up_vector_override is None:
-            up = np.array([0.0, 0.0, 1.0])
+        camera_pos = np.array(orbital_eye)
+        target = np.array(orbital_target)
+        up = np.array(up_vector_override if up_vector_override else [0.0, 0.0, 1.0])
+    else:
+        # Calculate camera position based on view axis
+        distance_padding = camera_cfg["distance_padding"]
+        distance = max_extent * distance_padding * 2.0  # Conservative distance
+
+        up = np.array(up_vector_override if up_vector_override else [0.0, 1.0, 0.0])
+
+        axis = view_axis.lower()
+        if axis == "+z":
+            camera_pos = np.array([center[0], center[1], center[2] + distance])
+        elif axis == "-z":
+            camera_pos = np.array([center[0], center[1], center[2] - distance])
+        elif axis == "+x":
+            camera_pos = np.array([center[0] + distance, center[1], center[2]])
+        elif axis == "-x":
+            camera_pos = np.array([center[0] - distance, center[1], center[2]])
+        elif axis == "+y":
+            camera_pos = np.array([center[0], center[1] + distance, center[2]])
+        elif axis == "-y":
+            camera_pos = np.array([center[0], center[1] - distance, center[2]])
         else:
-            up = np.array(up_vector_override, dtype=float)
-        camera_pose = _look_at_pose(
-            eye=np.array(orbital_eye), target=np.array(orbital_target), up=up
-        )
+            camera_pos = np.array([center[0], center[1], center[2] + distance])
+
+        target = center
+
+    # Create camera
+    aspect_ratio = width / height
+    if camera_type == "orthographic":
+        # For orthographic, use magnification to fit the mesh
+        if aspect_ratio > 1.0:
+            ymag = max_extent * camera_cfg["distance_padding"]
+            xmag = ymag * aspect_ratio
+        else:
+            xmag = max_extent * camera_cfg["distance_padding"]
+            ymag = xmag / aspect_ratio
+
+        # Apply zoom factor (dividing magnification = more zoomed in)
+        xmag /= ortho_zoom
+        ymag /= ortho_zoom
+
+        camera = gfx.OrthographicCamera(xmag * 2, ymag * 2)
     else:
-        # Use axis-based camera positioning
-        camera_pose = _calculate_camera_pose(
-            mesh,
-            aspect_ratio,
-            view_axis=view_axis,
-            yfov=yfov,
-            distance_padding=camera_cfg["distance_padding"],
-            up_vector_override=up_vector_override,
-        )
-    scene.set_pose(camera_node, camera_pose)
+        # Perspective camera
+        fov = camera_cfg["fov_degrees"]
+        # Set reasonable near/far clipping planes for perspective camera
+        # Near plane should be small but not too small to avoid z-fighting
+        # Far plane should be large enough to encompass the scene
+        near_plane = max_extent * 0.001  # Very close to camera
+        far_plane = max_extent * 100.0  # Far away
+        camera = gfx.PerspectiveCamera(fov, aspect_ratio, depth_range=(near_plane, far_plane))
 
-    # Implement Raymond 3-point lighting system from config
-    # All lights are positioned relative to camera pose for dynamic lighting
+    # Position camera and orient it to look at target with proper up vector
+    import pylinalg as la
 
-    # 1. Key Light (Headlamp): Main light straight from camera
-    key_light = pyrender.DirectionalLight(
-        color=[1.0, 1.0, 1.0], intensity=lighting_cfg["key_light_intensity"]
+    # Use mat_look_at(target, eye, up) to align -Z (forward) towards target
+    view_matrix = la.mat_look_at(target, camera_pos, up)
+    view_matrix[:3, 3] = camera_pos
+    camera.local.matrix = view_matrix
+    scene.add(camera)
+
+    # Compute safe up vector for lights to avoid gimbal lock
+    # If view direction is nearly parallel to up vector, use an alternate up vector
+    view_dir = target - camera_pos
+    view_dir_norm = view_dir / np.linalg.norm(view_dir)
+    up_norm = up / np.linalg.norm(up)
+
+    # Check if view direction and up vector are nearly parallel (dot product close to ±1)
+    dot_product = abs(float(np.dot(view_dir_norm, up_norm)))
+    if dot_product > 0.95:  # Nearly parallel
+        # Choose an alternate up vector perpendicular to view direction
+        # If current up is Y-up, use Z-up; if Z-up, use Y-up
+        light_up = np.array([0.0, 0.0, 1.0]) if abs(up[1]) > 0.5 else np.array([0.0, 1.0, 0.0])
+    else:
+        light_up = up
+
+    # Add lighting - always enabled so both solid mesh and wireframe can be seen together
+    # Ambient light
+    ambient = gfx.AmbientLight(intensity=scene_cfg["ambient_light"][0])
+    scene.add(ambient)
+
+    # Key light (main directional light) - controlled by user
+    # Attached to camera to act as a headlight
+    key_light = gfx.DirectionalLight(intensity=light_intensity)
+    camera.add(key_light)
+
+    # Fill light (offset directional light) - proportional to key light
+    fill_intensity = light_intensity * (
+        lighting_cfg["fill_light_intensity"] / lighting_cfg["key_light_intensity"]
     )
-    key_light_node = scene.add(key_light)
-    scene.set_pose(key_light_node, camera_pose)
-
-    # 2. Fill Light: offset from camera
-    fill_light = pyrender.DirectionalLight(
-        color=[1.0, 1.0, 1.0], intensity=lighting_cfg["fill_light_intensity"]
+    fill_light = gfx.DirectionalLight(intensity=fill_intensity)
+    fill_offset = _apply_angular_offset(
+        camera_pos,
+        target,
+        lighting_cfg["fill_light_azimuth"],
+        lighting_cfg["fill_light_elevation"],
     )
-    fill_light_node = scene.add(fill_light)
-    fill_light_pose = _compute_offset_light_pose(
-        camera_pose,
-        azimuth_deg=lighting_cfg["fill_light_azimuth"],
-        elevation_deg=lighting_cfg["fill_light_elevation"],
+    fill_light_matrix = la.mat_look_at(target, fill_offset, light_up)
+    fill_light_matrix[:3, 3] = fill_offset
+    fill_light.local.matrix = fill_light_matrix
+    scene.add(fill_light)
+    # Rim light (back light for edge definition) - proportional to key light
+    rim_intensity = light_intensity * (
+        lighting_cfg["rim_light_intensity"] / lighting_cfg["key_light_intensity"]
     )
-    scene.set_pose(fill_light_node, fill_light_pose)
-
-    # 3. Back/Rim Light: offset from camera for edge definition
-    rim_light = pyrender.DirectionalLight(
-        color=[1.0, 1.0, 1.0], intensity=lighting_cfg["rim_light_intensity"]
+    rim_light = gfx.DirectionalLight(intensity=rim_intensity)
+    rim_offset = _apply_angular_offset(
+        camera_pos,
+        target,
+        lighting_cfg["rim_light_azimuth"],
+        lighting_cfg["rim_light_elevation"],
     )
-    rim_light_node = scene.add(rim_light)
-    rim_light_pose = _compute_offset_light_pose(
-        camera_pose,
-        azimuth_deg=lighting_cfg["rim_light_azimuth"],
-        elevation_deg=lighting_cfg["rim_light_elevation"],
-    )
-    scene.set_pose(rim_light_node, rim_light_pose)
+    rim_light_matrix = la.mat_look_at(target, rim_offset, light_up)
+    rim_light_matrix[:3, 3] = rim_offset
+    rim_light.local.matrix = rim_light_matrix
+    rim_light_matrix = la.mat_look_at(rim_offset, target, light_up)
+    rim_light.local.matrix = rim_light_matrix
+    rim_light.local.position = tuple(rim_offset)
+    scene.add(rim_light)
 
-    # Render with offscreen renderer with alpha channel
-    flags = pyrender.RenderFlags.RGBA
+    # Get renderer and render
+    renderer, canvas = _get_renderer(width, height)
 
-    # Enable shadows if configured (disabled by default for performance)
-    perf_cfg = config.get_performance_config()
-    if perf_cfg["enable_shadows"]:
-        flags |= pyrender.RenderFlags.SHADOWS_DIRECTIONAL
+    # Render the scene
+    canvas.request_draw(lambda: renderer.render(scene, camera))
 
-    renderer = _get_renderer(width, height)
+    # Get the raw RGBA data from canvas
+    # The draw() method returns a memoryview that we can convert to bytes
+    image_array = np.asarray(canvas.draw())
 
-    # Attempt to set line width if wireframe is enabled
-    if wireframe_thickness > 0.0:
-        with contextlib.suppress(Exception):
-            # This requires the context to be active, which pyrender handles during render
-            # But we can try to set it globally for the context.
-            renderer._platform.make_current()
-            GL.glLineWidth(wireframe_thickness)
+    # Ensure RGBA format (height, width, 4)
+    if image_array.shape[-1] != 4:
+        raise RuntimeError(f"Expected RGBA output, got shape {image_array.shape}")
 
-    color, _ = renderer.render(scene, flags=flags)
+    # Convert to bytes (row-major order)
+    raw_bytes = image_array.tobytes()
+    camera_pos_tuple = tuple(camera_pos)
 
-    # Reset line width
-    if wireframe_thickness > 0.0:
-        with contextlib.suppress(Exception):
-            GL.glLineWidth(1.0)
-
-    # Return raw RGBA bytes
-    # color is a numpy array of shape (height, width, 4) with dtype uint8
-    raw_bytes = color.tobytes()
-
-    # Extract camera position from pose matrix
-    camera_pos = tuple(camera_pose[:3, 3])
-
-    return raw_bytes, camera_pos
+    return raw_bytes, camera_pos_tuple
 
 
-def _calculate_camera_pose(
-    mesh: trimesh.Trimesh,
-    aspect_ratio: float,
-    view_axis: str = "+z",
-    yfov: float = np.pi / 3.0,
-    distance_padding: float = 1.0,
-    up_vector_override: tuple[float, float, float] | None = None,
+def _apply_angular_offset(
+    camera_pos: np.ndarray,
+    target: np.ndarray,
+    azimuth_deg: float,
+    elevation_deg: float,
 ) -> np.ndarray:
-    """Calculate camera pose to view the entire mesh optimally.
-
-    Positions camera along the specified axis looking at the mesh, with distance
-    calculated to fit the entire mesh with padding.
+    """Apply angular offset to camera position for light positioning.
 
     Args:
-        mesh: The mesh to view
-        aspect_ratio: Width/height ratio of the viewport
-        view_axis: Camera view axis ('+x', '-x', '+y', '-y', '+z', '-z')
-        yfov: Vertical field of view in radians
-        distance_padding: Multiplier for calculated distance (larger = farther)
-        up_vector_override: Optional up vector override
+        camera_pos: Camera position
+        target: Look-at target
+        azimuth_deg: Azimuth angle in degrees (horizontal rotation)
+        elevation_deg: Elevation angle in degrees (vertical rotation)
 
     Returns:
-        4x4 camera pose matrix
+        New position with angular offset applied
     """
-    # World-space AABB center
-    bounds = mesh.bounds
-    aabb_min = bounds[0]
-    aabb_max = bounds[1]
-    center = (aabb_min + aabb_max) / 2.0
+    # Calculate view direction
+    view_dir = camera_pos - target
+    distance = float(np.linalg.norm(view_dir))
 
-    # Auto-distance to fit: D = (MaxExtent / tan(FOV/2)) * padding
-    extents = aabb_max - aabb_min
-    max_extent = float(np.max(extents))
-    tan_half_fov = float(np.tan(yfov / 2.0))
-    if not np.isfinite(tan_half_fov) or tan_half_fov <= 0.0:
-        tan_half_fov = 1e-6
-    distance = (max_extent / tan_half_fov) * distance_padding
-    if not np.isfinite(distance) or distance <= 0.0:
-        distance = 1.0
+    # Convert to spherical coordinates
+    xy_dist = np.sqrt(view_dir[0] ** 2 + view_dir[1] ** 2)
+    theta = np.arctan2(view_dir[1], view_dir[0])  # azimuth
+    phi = np.arctan2(view_dir[2], xy_dist)  # elevation
 
-    axis = view_axis.lower()
+    # Apply offsets
+    theta += np.radians(azimuth_deg)
+    phi += np.radians(elevation_deg)
 
-    # Use the provided up vector (will be config default when not explicitly cycling)
-    if up_vector_override is None:
-        # Fallback to Y-up if no override provided (shouldn't happen in practice)
-        up = np.array([0.0, 1.0, 0.0])
-    else:
-        up = np.array(up_vector_override, dtype=float)
+    # Convert back to Cartesian
+    new_pos = np.array(
+        [
+            distance * np.cos(phi) * np.cos(theta),
+            distance * np.cos(phi) * np.sin(theta),
+            distance * np.sin(phi),
+        ]
+    )
 
-    if axis == "+z":
-        eye = np.array([center[0], center[1], center[2] + distance])
-    elif axis == "-z":
-        eye = np.array([center[0], center[1], center[2] - distance])
-    elif axis == "+x":
-        eye = np.array([center[0] + distance, center[1], center[2]])
-    elif axis == "-x":
-        eye = np.array([center[0] - distance, center[1], center[2]])
-    elif axis == "+y":
-        eye = np.array([center[0], center[1] + distance, center[2]])
-    elif axis == "-y":
-        eye = np.array([center[0], center[1] - distance, center[2]])
-    else:
-        eye = np.array([center[0], center[1], center[2] + distance])
-
-    return _look_at_pose(eye=eye, target=center, up=up)
-
-
-def _compute_offset_light_pose(
-    camera_pose: np.ndarray, azimuth_deg: float, elevation_deg: float
-) -> np.ndarray:
-    """Compute a light pose offset from the camera pose.
-
-    Args:
-        camera_pose: 4x4 camera pose matrix
-        azimuth_deg: Azimuth angle in degrees (rotation around Y-axis)
-        elevation_deg: Elevation angle in degrees (rotation around X-axis)
-
-    Returns:
-        4x4 light pose matrix
-    """
-    # Extract camera orientation and position
-    cam_right = camera_pose[:3, 0]
-    cam_up = camera_pose[:3, 1]
-    cam_forward = camera_pose[:3, 2]
-    cam_pos = camera_pose[:3, 3]
-
-    # Convert angles to radians
-    azimuth_rad = np.radians(azimuth_deg)
-    elevation_rad = np.radians(elevation_deg)
-
-    # Rotate around camera's up axis (azimuth)
-    cos_az = np.cos(azimuth_rad)
-    sin_az = np.sin(azimuth_rad)
-    # Rotate the forward vector around up
-    rotated_forward = cos_az * cam_forward + sin_az * cam_right
-
-    # Rotate around the right axis (elevation)
-    cos_el = np.cos(elevation_rad)
-    sin_el = np.sin(elevation_rad)
-    final_forward = cos_el * rotated_forward + sin_el * cam_up
-
-    # Normalize
-    final_forward = final_forward / np.linalg.norm(final_forward)
-
-    # Recompute right and up vectors
-    final_right = np.cross(cam_up, final_forward)
-    final_right = final_right / np.linalg.norm(final_right)
-    final_up = np.cross(final_forward, final_right)
-
-    # Build light pose
-    light_pose = np.eye(4)
-    light_pose[:3, 0] = final_right
-    light_pose[:3, 1] = final_up
-    light_pose[:3, 2] = final_forward
-    light_pose[:3, 3] = cam_pos
-
-    return light_pose
-
-
-def _look_at_pose(eye: np.ndarray, target: np.ndarray, up: np.ndarray) -> np.ndarray:
-    """Create a pyrender camera pose matrix from eye/target/up.
-
-    Returns a camera-to-world transform where the camera looks towards target.
-    Pyrender uses an OpenGL-style camera where -Z is forward.
-    """
-    eye = np.asarray(eye, dtype=float)
-    target = np.asarray(target, dtype=float)
-    up = np.asarray(up, dtype=float)
-
-    z = eye - target
-    z_norm = np.linalg.norm(z)
-    z = np.array([0.0, 0.0, 1.0]) if z_norm == 0 or not np.isfinite(z_norm) else z / z_norm
-
-    x = np.cross(up, z)
-    x_norm = np.linalg.norm(x)
-    if x_norm == 0 or not np.isfinite(x_norm):
-        # Fallback: choose an alternate up if up is parallel to view direction
-        fallback_up = np.array([0.0, 0.0, 1.0]) if abs(z[2]) < 0.9 else np.array([0.0, 1.0, 0.0])
-        x = np.cross(fallback_up, z)
-        x_norm = np.linalg.norm(x)
-        if x_norm == 0 or not np.isfinite(x_norm):
-            x = np.array([1.0, 0.0, 0.0])
-            x_norm = 1.0
-    x = x / x_norm
-
-    y = np.cross(z, x)
-
-    pose = np.eye(4)
-    pose[:3, 0] = x
-    pose[:3, 1] = y
-    pose[:3, 2] = z
-    pose[:3, 3] = eye
-    return pose
-
-
-def _get_light_pose() -> np.ndarray:
-    """Get pose for directional light.
-
-    Returns:
-        4x4 light pose matrix
-    """
-    # Position light from upper right
-    pose = np.eye(4)
-    pose[:3, 3] = [1, 2, 1]
-    return pose
+    return target + new_pos

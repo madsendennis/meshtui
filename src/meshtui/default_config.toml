@@ -42,7 +42,7 @@ bg_color_light = [255, 255, 255, 0]    # Background for light terminals (RGBA)
 
 [lighting]
 # Raymond 3-point lighting system intensities
-key_light_intensity = 3.5              # Main headlamp from camera
+key_light_intensity = 1.5              # Main headlamp from camera
 fill_light_intensity = 1.5             # Fill light (45° left, 15° up)
 fill_light_azimuth = -45.0             # Azimuth angle in degrees
 fill_light_elevation = 15.0            # Elevation angle in degrees
@@ -53,8 +53,8 @@ rim_light_elevation = 10.0             # Elevation angle in degrees
 [wireframe]
 # Wireframe overlay settings
 default_thickness = 0.0                # Default wireframe thickness (0.0 = off)
-color_dark_bg = [255, 255, 255, 255]   # White wireframe for dark backgrounds
-color_light_bg = [0, 0, 0, 255]        # Black wireframe for light backgrounds
+color_dark_bg = [120, 120, 120, 255]   # Medium grey wireframe for dark backgrounds
+color_light_bg = [60, 60, 60, 255]     # Dark grey wireframe for light backgrounds
 
 [performance]
 # Performance optimization settings
@@ -62,3 +62,53 @@ color_light_bg = [0, 0, 0, 255]        # Black wireframe for light backgrounds
 render_scale = 0.5                     # Resolution scale for rendering (0.1-1.0, lower = faster)
                                        # Rendered image is upscaled by Kitty protocol to full display size
 enable_shadows = false                 # Enable shadows from directional lights (costs performance)
+
+[keybindings]
+# Keybindings for controlling the viewer
+# Keys can be single characters, special keys ("esc", "space", "tab"), or modifier combinations ("ctrl+c")
+# Multiple keys can be assigned to the same action using arrays
+
+# General actions
+quit = "q"
+help_toggle = "?"
+help_close = "esc"  # Only active when help is shown
+
+# View axis switching
+view_minus_x = "x"
+view_plus_x = "X"
+view_minus_y = "y"
+view_plus_y = "Y"
+view_minus_z = "z"
+view_plus_z = "Z"
+
+# Wireframe controls
+wireframe_off = "g"
+wireframe_increase = "G"
+
+# Camera type toggle
+toggle_camera_type = ["w", "W"]
+
+# Lighting controls
+light_decrease = "i"
+light_increase = "I"
+
+# Up vector cycling
+up_vector_next = "u"
+up_vector_prev = "U"
+
+# Orbital camera controls (vim-style)
+orbit_left = "h"
+orbit_right = "l"
+orbit_down = "j"
+orbit_up = "k"
+orbit_left_fast = "H"
+orbit_right_fast = "L"
+orbit_down_fast = "J"
+orbit_up_fast = "K"
+
+# Zoom controls
+zoom_in = "r"
+zoom_out = "R"
+
+# Reset controls
+reset_orbital = "0"

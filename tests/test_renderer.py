@@ -62,6 +62,15 @@ class TestRenderMesh:
         img = Image.frombytes("RGBA", (width, height), image_data)
         assert img.size == (width, height)
 
+    def test_renders_perspective(self) -> None:
+        """Test rendering with perspective camera."""
+        mesh = trimesh.creation.box()
+        width, height = 400, 300
+        image_data, _ = render_mesh(mesh, width, height, camera_type="perspective")
+        assert len(image_data) == width * height * 4
+        img = Image.frombytes("RGBA", (width, height), image_data)
+        assert img.size == (width, height)
+
     def test_invalid_dimensions_zero_width(self) -> None:
         """Test error handling for zero width."""
         mesh = trimesh.creation.box()

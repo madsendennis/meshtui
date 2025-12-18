@@ -11,7 +11,7 @@ def load_mesh(file_path: Path) -> trimesh.Trimesh:
     Loads a mesh file without altering its world-space coordinates.
 
     Args:
-        file_path: Path to the mesh file (.ply or .stl)
+        file_path: Path to the mesh file (.ply, .stl, .obj, .drc, .glb)
 
     Returns:
         Loaded and processed trimesh.Trimesh object
@@ -25,11 +25,11 @@ def load_mesh(file_path: Path) -> trimesh.Trimesh:
         raise FileNotFoundError(f"File not found: {file_path}")
 
     # Validate file extension
-    supported_extensions = {".ply", ".stl"}
+    supported_extensions = {".ply", ".stl", ".obj", ".drc", ".glb"}
     if file_path.suffix.lower() not in supported_extensions:
         raise ValueError(
             f"Unsupported file format: {file_path.suffix}. "
-            f"Supported formats: {', '.join(supported_extensions)}"
+            f"Supported formats: {', '.join(sorted(supported_extensions))}"
         )
 
     # Load mesh
