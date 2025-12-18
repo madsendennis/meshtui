@@ -204,9 +204,19 @@ class TUI:
                         self.resize_pending = False
                         self.render_and_display(clear_screen=True)
 
+                    # Animation step
+                    smoothing = self.orbital_config.get("smoothing_factor", 0.6)
+                    is_animating = self.camera.animate(smoothing)
+
+                    if is_animating:
+                        self.render_and_display(clear_screen=False)
+                        timeout = 0.0  # Don't block if animating
+                    else:
+                        timeout = 0.1  # Block briefly if idle
+
                     # Use a timeout to allow checking for resize events if select is not interrupted
                     try:
-                        rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
+                        rlist, _, _ = select.select([sys.stdin], [], [], timeout)
                     except OSError:
                         # Likely interrupted by signal (resize)
                         continue
@@ -250,8 +260,11 @@ class TUI:
             # Switch camera instance but preserve state where possible
             target = self.camera.target
             radius = self.camera.radius
+            target_radius = self.camera.target_radius
             theta = self.camera.theta
+            target_theta = self.camera.target_theta
             phi = self.camera.phi
+            target_phi = self.camera.target_phi
             up = self.camera.up_vector
 
             if isinstance(self.camera, PerspectiveCamera):
@@ -260,8 +273,11 @@ class TUI:
                 self.camera = PerspectiveCamera(target)
 
             self.camera.radius = radius
+            self.camera.target_radius = target_radius
             self.camera.theta = theta
+            self.camera.target_theta = target_theta
             self.camera.phi = phi
+            self.camera.target_phi = target_phi
             self.camera.up_vector = up
             self.camera.update_position()
             return True

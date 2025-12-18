@@ -19,10 +19,12 @@ class TestCamera:
         cam = PerspectiveCamera()
 
         cam.set_view_axis("+z")
+        cam.animate(1.0)  # Snap to target
         assert cam.theta == math.pi / 2.0
         assert cam.phi == math.pi / 2.0
 
         cam.set_view_axis("-z")
+        cam.animate(1.0)
         assert cam.theta == -math.pi / 2.0
         assert cam.phi == math.pi / 2.0
 
@@ -35,6 +37,7 @@ class TestCamera:
         initial_phi = cam.phi
 
         cam.orbit(0.1, 0.1)
+        cam.animate(1.0)
         assert cam.theta == initial_theta + 0.1
         assert cam.phi == initial_phi + 0.1
 
@@ -42,10 +45,12 @@ class TestCamera:
         cam = PerspectiveCamera()
         initial_radius = cam.radius
         cam.zoom(0.5)
+        cam.animate(1.0)
         assert cam.radius == initial_radius * 0.5
 
     def test_zoom_orthographic(self):
         cam = OrthographicCamera()
         initial_zoom = cam.zoom_level
         cam.zoom(2.0)
+        cam.animate(1.0)
         assert cam.zoom_level == initial_zoom * 2.0

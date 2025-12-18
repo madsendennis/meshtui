@@ -20,6 +20,11 @@ class Camera(ABC):
         self.phi: float = math.pi / 2.0
         self.radius: float = 1.0
 
+        # Target state for smoothing
+        self.target_theta: float = self.theta
+        self.target_phi: float = self.phi
+        self.target_radius: float = self.radius
+
         # Configuration
         self.config = config.get_camera_config()
         self.orbital_config = config.get_orbital_camera_config()
@@ -34,51 +39,84 @@ class Camera(ABC):
         """Zoom the camera by a factor."""
         pass
 
+    @abstractmethod
+    def animate(self, smoothing_factor: float = 0.1) -> bool:
+        """Animate camera towards target state. Returns True if updated."""
+        pass
+
     def set_view_axis(self, axis: ViewAxis) -> None:
         """Set the camera to view from a specific axis."""
         axis = axis.lower()  # type: ignore
         if axis == "+z":
-            self.theta = math.pi / 2.0
-            self.phi = math.pi / 2.0
+            self.target_theta = math.pi / 2.0
+            self.target_phi = math.pi / 2.0
             self.up_vector = (0.0, 1.0, 0.0)
         elif axis == "-z":
-            self.theta = -math.pi / 2.0
-            self.phi = math.pi / 2.0
+            self.target_theta = -math.pi / 2.0
+            self.target_phi = math.pi / 2.0
             self.up_vector = (0.0, 1.0, 0.0)
         elif axis == "+x":
-            self.theta = 0.0
-            self.phi = math.pi / 2.0
+            self.target_theta = 0.0
+            self.target_phi = math.pi / 2.0
             self.up_vector = (0.0, 0.0, 1.0)
         elif axis == "-x":
-            self.theta = math.pi
-            self.phi = math.pi / 2.0
+            self.target_theta = math.pi
+            self.target_phi = math.pi / 2.0
             self.up_vector = (0.0, 0.0, 1.0)
         elif axis == "+y":
-            self.theta = math.pi / 2.0
-            self.phi = math.pi / 2.0  # This is weird for +Y view.
-            # Original code:
-            # elif axis == "+y":
-            #    # Camera at +Y looking toward -Y. Uses Z-up.
-            #    _orbital_theta = math.pi / 2.0
-            #    _orbital_phi = math.pi / 2.0
+            self.target_theta = math.pi / 2.0
+            self.target_phi = math.pi / 2.0
             self.up_vector = (0.0, 0.0, 1.0)
         elif axis == "-y":
-            self.theta = -math.pi / 2.0
-            self.phi = math.pi / 2.0
+            self.target_theta = -math.pi / 2.0
+            self.target_phi = math.pi / 2.0
             self.up_vector = (0.0, 0.0, 1.0)
 
-        # Re-calculate position based on new angles
-        self.update_position()
+        # Adjust target theta to be closest to current theta to avoid spinning
+        diff = self.target_theta - self.theta
+        diff = (diff + math.pi) % (2 * math.pi) - math.pi
+        self.target_theta = self.theta + diff
 
     def orbit(self, delta_theta: float, delta_phi: float) -> None:
         """Orbit the camera around the target."""
-        self.theta += delta_theta
-        self.phi += delta_phi
+        self.target_theta += delta_theta
+        self.target_phi += delta_phi
 
         # Clamp phi to avoid gimbal lock
-        self.phi = max(0.1, min(math.pi - 0.1, self.phi))
+        self.target_phi = max(0.1, min(math.pi - 0.1, self.target_phi))
 
-        self.update_position()
+    def _animate_orbital(self, smoothing_factor: float) -> bool:
+        updated = False
+        epsilon = 0.001
+
+        # Theta
+        diff = self.target_theta - self.theta
+        if abs(diff) > epsilon:
+            self.theta += diff * smoothing_factor
+            updated = True
+        else:
+            self.theta = self.target_theta
+
+        # Phi
+        diff = self.target_phi - self.phi
+        if abs(diff) > epsilon:
+            self.phi += diff * smoothing_factor
+            updated = True
+        else:
+            self.phi = self.target_phi
+
+        # Radius
+        diff = self.target_radius - self.radius
+        if abs(diff) > epsilon:
+            self.radius += diff * smoothing_factor
+            updated = True
+        else:
+            self.radius = self.target_radius
+
+        if updated:
+            self.update_position()
+
+        return updated
 
     def update_position(self) -> None:
         """Update Cartesian position from spherical coordinates."""
@@ -113,6 +151,7 @@ class Camera(ABC):
 
     def set_radius(self, radius: float) -> None:
         self.radius = radius
+        self.target_radius = radius
         self.update_position()
 
 
@@ -122,14 +161,17 @@ class PerspectiveCamera(Camera):
 
     def zoom(self, factor: float) -> None:
         """Zoom by changing the orbital radius."""
-        self.radius *= factor
-        self.update_position()
+        self.target_radius *= factor
+
+    def animate(self, smoothing_factor: float = 0.1) -> bool:
+        return self._animate_orbital(smoothing_factor)
 
 
 class OrthographicCamera(Camera):
     def __init__(self, target: tuple[float, float, float] = (0.0, 0.0, 0.0)):
         super().__init__(target)
         self.zoom_level = 1.0
+        self.target_zoom_level = 1.0
 
     def get_type(self) -> str:
         return "orthographic"
@@ -138,4 +180,17 @@ class OrthographicCamera(Camera):
         """Zoom by changing the orthographic scale."""
         # For ortho, "zoom in" means smaller view volume, so we multiply by factor
         # If factor < 1 (zoom in), zoom_level decreases.
-        self.zoom_level *= factor
+        self.target_zoom_level *= factor
+
+    def animate(self, smoothing_factor: float = 0.1) -> bool:
+        updated = self._animate_orbital(smoothing_factor)
+
+        epsilon = 0.001
+        diff = self.target_zoom_level - self.zoom_level
+        if abs(diff) > epsilon:
+            self.zoom_level += diff * smoothing_factor
+            updated = True
+        else:
+            self.zoom_level = self.target_zoom_level
+
+        return updated

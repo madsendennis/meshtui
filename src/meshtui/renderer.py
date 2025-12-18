@@ -3,10 +3,14 @@
 import numpy as np
 import pygfx as gfx
 import trimesh
+import wgpu  # type: ignore
 from rendercanvas.offscreen import RenderCanvas
 
 from meshtui import config
 from meshtui.kitty_protocol import detect_terminal_background
+
+# Suppress wgpu warnings (like VK_EXT_physical_device_drm missing)
+wgpu.logger.setLevel("ERROR")
 
 # Cache for the renderer to avoid recreating context
 _renderer: gfx.renderers.WgpuRenderer | None = None
