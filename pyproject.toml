@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.scripts]
-meshtui = "meshtui.main:main"
+meshtui = "meshtui.main:app"
 
 [project.optional-dependencies]
 dev = [

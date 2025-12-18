@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, TypedDict
 
 import trimesh
+import typer
 
 from meshtui import config
 from meshtui.kitty_protocol import (
@@ -1145,24 +1146,24 @@ def cleanup_tui() -> None:
     sys.stdout.flush()
 
 
-def main() -> int:
-    """Main entry point for meshtui CLI.
+def main(
+    mesh_file: Path = typer.Argument(  # noqa: B008
+        ...,
+        help="Path to the mesh file to display (supports .ply, .stl, .obj, .drc, .glb)",
+    ),
+) -> int:
+    """Terminal-based 3D mesh viewer using Kitty graphics protocol.
 
-    Loads a mesh file, renders it, and displays it in the terminal.
-    Automatically rerenders on terminal resize.
+    Load a 3D mesh file and interactively view it in your terminal with
+    orbital camera controls, wireframe rendering, and lighting adjustments.
 
-    Returns:
-        Exit code (0 for success, non-zero for error)
+    Examples:
+        meshtui model.ply
+        meshtui path/to/mesh.stl
     """
     global _current_mesh
 
-    # Parse arguments
-    if len(sys.argv) < 2:
-        print("Usage: meshtui <mesh_file>", file=sys.stderr)
-        print("\nSupported formats: .ply, .stl, .obj, .drc, .glb", file=sys.stderr)
-        return 1
-
-    mesh_path = Path(sys.argv[1])
+    mesh_path = mesh_file
 
     try:
         # Check terminal compatibility
@@ -1218,5 +1219,12 @@ def main() -> int:
         cleanup_tui()
 
 
+app = typer.Typer(
+    name="meshtui",
+    help="Terminal-based 3D mesh viewer using Kitty graphics protocol",
+)
+app.command()(main)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    app()
