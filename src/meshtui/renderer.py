@@ -37,6 +37,7 @@ def render_mesh(
     up_vector_override: tuple[float, float, float] | None = None,
     orbital_eye: tuple[float, float, float] | None = None,
     orbital_target: tuple[float, float, float] | None = None,
+    camera_type: str = "orthographic",
 ) -> tuple[bytes, tuple[float, float, float]]:
     """Render a mesh to raw RGBA image data.
 
@@ -53,6 +54,7 @@ def render_mesh(
         up_vector_override: Optional up vector for camera orientation
         orbital_eye: Optional camera eye position for orbital mode
         orbital_target: Optional camera target position for orbital mode
+        camera_type: Camera type ('perspective' or 'orthographic')
 
     Returns:
         Tuple of (Raw RGBA image data as bytes, camera position as (x, y, z))
@@ -120,11 +122,34 @@ def render_mesh(
         wireframe_mesh = pyrender.Mesh([wireframe])
         scene.add(wireframe_mesh)
 
-    # Set up camera with FOV from config
+    # Set up camera
     camera_cfg = config.get_camera_config()
     aspect_ratio = width / height
-    fov_radians = np.radians(camera_cfg["fov_degrees"])
-    camera = pyrender.PerspectiveCamera(yfov=fov_radians, aspectRatio=aspect_ratio)
+
+    if camera_type == "orthographic":
+        # Calculate magnification to fit mesh
+        bounds = mesh.bounds
+        extents = bounds[1] - bounds[0]
+        max_extent = float(np.max(extents)) * camera_cfg["distance_padding"]
+
+        # We want to fit max_extent in the view.
+        # If aspect_ratio > 1, height is the limiting factor for ymag
+        # If aspect_ratio < 1, width is the limiting factor for xmag
+        if aspect_ratio > 1.0:
+            ymag = max_extent / 2.0
+            xmag = ymag * aspect_ratio
+        else:
+            xmag = max_extent / 2.0
+            ymag = xmag / aspect_ratio
+
+        camera = pyrender.OrthographicCamera(xmag=xmag, ymag=ymag)
+        # For pose calculation, we still need a dummy FOV
+        yfov = np.pi / 3.0
+    else:
+        fov_radians = np.radians(camera_cfg["fov_degrees"])
+        camera = pyrender.PerspectiveCamera(yfov=fov_radians, aspectRatio=aspect_ratio)
+        yfov = camera.yfov
+
     camera_node = scene.add(camera)
 
     # Use orbital camera if eye and target are provided
@@ -143,7 +168,7 @@ def render_mesh(
             mesh,
             aspect_ratio,
             view_axis=view_axis,
-            yfov=camera.yfov,
+            yfov=yfov,
             distance_padding=camera_cfg["distance_padding"],
             up_vector_override=up_vector_override,
         )

@@ -3,7 +3,8 @@
 
 [camera]
 # Camera settings
-fov_degrees = 60.0                     # Field of view in degrees (vertical)
+type = "orthographic"                  # Camera type: "perspective" or "orthographic"
+fov_degrees = 60.0                     # Field of view in degrees (vertical) for perspective
 distance_padding = 1.0                 # Multiplier for auto-calculated distance (larger = farther)
 
 [orbital_camera]

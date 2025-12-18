@@ -21,6 +21,7 @@ from meshtui.mesh_loader import load_mesh
 from meshtui.renderer import render_mesh
 
 # Load configuration defaults
+_CAMERA_CONFIG = config.get_camera_config()
 _VIEW_CONFIG = config.get_view_config()
 _WIREFRAME_CONFIG = config.get_wireframe_config()
 _ORBITAL_CONFIG = config.get_orbital_camera_config()
@@ -30,6 +31,7 @@ _current_mesh: trimesh.Trimesh | None = None
 _resize_pending = False
 _view_axis = _VIEW_CONFIG["default_axis"]
 _wireframe_thickness = _WIREFRAME_CONFIG["default_thickness"]
+_camera_type = _CAMERA_CONFIG["type"]
 _show_help = False
 _up_vector_cycle_index = -1  # -1 means use default (index 0)
 _up_vector_override: tuple[float, float, float] | None = None
@@ -196,8 +198,16 @@ def draw_interface(cols: int, rows: int, mesh: trimesh.Trimesh | None = None) ->
 
     # Footer
     up_text = _format_vec3(_effective_up_vector(_view_axis, _up_vector_override))
-    cam_text = _format_vec3(_camera_position)
-    left_text = f" q: Quit | ?: Help | u/U: Up {up_text} | Cam {cam_text}"
+    cam_pos_text = _format_vec3(_camera_position)
+
+    if _camera_type == "orthographic":
+        cam_type_text = "Ortho"
+    else:
+        cam_type_text = f"Persp ({_CAMERA_CONFIG['fov_degrees']}°)"
+
+    left_text = (
+        f" q: Quit | ?: Help | c/C: {cam_type_text} | u/U: Up {up_text} | Cam {cam_pos_text}"
+    )
 
     right_text = ""
     if mesh is not None:
@@ -239,6 +249,7 @@ def draw_help_menu(cols: int, rows: int) -> None:
         "  y/Y : View from +/- Y axis",
         "  z/Z : View from +/- Z axis",
         f"  u/U : Cycle camera Up vector (current {up_text})",
+        "  c/C : Toggle Perspective/Orthographic camera",
         "",
         "Orbital Camera (vim-style):",
         "  h/l : Orbit Left/Right",
@@ -348,6 +359,7 @@ def render_and_display(
             "axis": _view_axis,
             "wireframe": _wireframe_thickness,
             "up": _up_vector_override,
+            "camera_type": _camera_type,
             "orbital_active": _orbital_active,
             "orbital_theta": _orbital_theta,
             "orbital_phi": _orbital_phi,
@@ -372,6 +384,7 @@ def render_and_display(
                     up_vector_override=effective_up,
                     orbital_eye=eye,
                     orbital_target=_orbital_target,
+                    camera_type=_camera_type,
                 )
             else:
                 image_data, cam_pos = render_mesh(
@@ -381,6 +394,7 @@ def render_and_display(
                     view_axis=_view_axis,
                     wireframe_thickness=_wireframe_thickness,
                     up_vector_override=effective_up,
+                    camera_type=_camera_type,
                 )
             _last_image_data = image_data
             _camera_position = cam_pos
@@ -435,6 +449,7 @@ def wait_for_exit() -> None:
     global _up_vector_override
     global _view_axis
     global _wireframe_thickness
+    global _camera_type
     global _orbital_active
     global _orbital_theta
     global _orbital_phi
@@ -509,6 +524,12 @@ def wait_for_exit() -> None:
                         needs_rerender = True
                     elif char == "g":
                         _wireframe_thickness = 0.0
+                        needs_rerender = True
+                    elif char in ["c", "C"]:
+                        if _camera_type == "perspective":
+                            _camera_type = "orthographic"
+                        else:
+                            _camera_type = "perspective"
                         needs_rerender = True
                     elif char == "u":
                         if _up_vector_cycle_index == -1:
