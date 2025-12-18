@@ -98,3 +98,8 @@ def get_view_config() -> dict[str, Any]:
 def get_orbital_camera_config() -> dict[str, Any]:
     """Get orbital camera configuration settings."""
     return cast(dict[str, Any], _CONFIG["orbital_camera"])
+
+
+def get_performance_config() -> dict[str, Any]:
+    """Get performance configuration settings."""
+    return cast(dict[str, Any], _CONFIG["performance"])

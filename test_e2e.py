@@ -36,11 +36,12 @@ def test_full_pipeline() -> int:
 
         # Test 2: Render mesh
         print("Testing rendering...")
-        png_data, camera_pos = render_mesh(loaded_mesh, width=800, height=600)
-        assert len(png_data) > 0, "PNG data generated"
-        assert png_data.startswith(b"\x89PNG"), "Valid PNG header"
+        image_data, camera_pos = render_mesh(loaded_mesh, width=800, height=600)
+        assert len(image_data) > 0, "Image data generated"
+        # Should be raw RGBA data: width * height * 4 bytes
+        assert len(image_data) == 800 * 600 * 4, "Valid RGBA data size"
         assert len(camera_pos) == 3, "Camera position returned"
-        print(f"  ✓ Rendered mesh to PNG ({len(png_data)} bytes)")
+        print(f"  ✓ Rendered mesh to RGBA ({len(image_data)} bytes)")
 
         # Test 3: Full CLI pipeline (mocked)
         print("Testing CLI integration...")

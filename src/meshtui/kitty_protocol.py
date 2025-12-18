@@ -216,15 +216,23 @@ def get_terminal_size() -> tuple[int, int, int, int]:
     return width_px, height_px, cell_width_px, cell_height_px
 
 
-def display_image(image_data: bytes, width: int, height: int, cols: int = 0, rows: int = 0) -> None:
+def display_image(
+    image_data: bytes,
+    width: int,
+    height: int,
+    cols: int = 0,
+    rows: int = 0,
+    image_id: int = 1,
+) -> None:
     """Display an image in the terminal using Kitty graphics protocol.
 
     Args:
-        image_data: PNG image data as bytes
-        width: Image width in pixels (optional, for protocol metadata)
-        height: Image height in pixels (optional, for protocol metadata)
+        image_data: Raw RGBA image data as bytes
+        width: Image width in pixels
+        height: Image height in pixels
         cols: Number of columns to fill (optional)
         rows: Number of rows to fill (optional)
+        image_id: Unique ID for the image (default: 1). Reusing ID overwrites.
 
     Raises:
         RuntimeError: If not running in a Kitty-compatible terminal
@@ -245,14 +253,15 @@ def display_image(image_data: bytes, width: int, height: int, cols: int = 0, row
     # Format: ESC _G<control_data>;<payload>ESC \
     # Parameters:
     #   a=T - transmit image data
-    #   f=100 - PNG format (100 = direct RGB data, but we use PNG)
-    #   t=d - direct data (base64-encoded PNG)
-    #   c, r - columns and rows to fill
+    #   f=32 - RGBA format (32-bit)
+    #   s=width, v=height - image dimensions in pixels
+    #   i=image_id - image ID for persistence/overwriting
+    #   q=2 - suppress OK response
     for i, chunk in enumerate(chunks):
         if i == 0:
             # First chunk - include all control data
             # z=-1 places image below text
-            control = "a=T,f=100,t=d,z=-1"
+            control = f"a=T,f=32,s={width},v={height},i={image_id},q=2,z=-1"
 
             # Add scaling parameters if provided
             if cols > 0 and rows > 0:

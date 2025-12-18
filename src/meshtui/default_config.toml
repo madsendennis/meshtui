@@ -21,10 +21,10 @@ default_axis = "+z"                    # Default view axis: +x, -x, +y, -y, +z, 
 
 # Up vectors for cycling with u/U keys (first one is the default)
 up_vectors = [ # First index is default
-    [0.0, 0.0, 1.0],   # Z-up
     [0.0, 1.0, 0.0],   # Y-up
-    [0.0, -1.0, 0.0],  # Y-down
-    [0.0, 0.0, -1.0],  # Z-down
+    [0.0, 0.0, 1.0],   # Z-up
+    [0.0, -1.0, 0.0],   # Y-down
+    [0.0, 0.0, -1.0],   # Z-down
 ]
 
 [material]
@@ -54,3 +54,10 @@ rim_light_elevation = 10.0             # Elevation angle in degrees
 default_thickness = 0.0                # Default wireframe thickness (0.0 = off)
 color_dark_bg = [255, 255, 255, 255]   # White wireframe for dark backgrounds
 color_light_bg = [0, 0, 0, 255]        # Black wireframe for light backgrounds
+
+[performance]
+# Performance optimization settings
+# Note: Already optimized - uses raw RGBA transfer (no PNG encoding overhead)
+render_scale = 0.5                     # Resolution scale for rendering (0.1-1.0, lower = faster)
+                                       # Rendered image is upscaled by Kitty protocol to full display size
+enable_shadows = false                 # Enable shadows from directional lights (costs performance)

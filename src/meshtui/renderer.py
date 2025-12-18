@@ -1,13 +1,11 @@
 """Mesh rendering using pyrender."""
 
 import contextlib
-import io
 
 import numpy as np
 import pyrender
 import trimesh
 from OpenGL import GL
-from PIL import Image
 
 from meshtui import config
 from meshtui.kitty_protocol import detect_terminal_background
@@ -40,10 +38,10 @@ def render_mesh(
     orbital_eye: tuple[float, float, float] | None = None,
     orbital_target: tuple[float, float, float] | None = None,
 ) -> tuple[bytes, tuple[float, float, float]]:
-    """Render a mesh to a PNG image.
+    """Render a mesh to raw RGBA image data.
 
     Creates a scene with the mesh, camera, and lighting, then renders it
-    to a PNG image suitable for display in the terminal. Uses transparent
+    to a raw RGBA buffer suitable for display in the terminal. Uses transparent
     background to match terminal and adjusts mesh color for contrast.
 
     Args:
@@ -57,7 +55,7 @@ def render_mesh(
         orbital_target: Optional camera target position for orbital mode
 
     Returns:
-        Tuple of (PNG image data as bytes, camera position as (x, y, z))
+        Tuple of (Raw RGBA image data as bytes, camera position as (x, y, z))
 
     Raises:
         ValueError: If width or height are invalid
@@ -187,6 +185,12 @@ def render_mesh(
 
     # Render with offscreen renderer with alpha channel
     flags = pyrender.RenderFlags.RGBA
+
+    # Enable shadows if configured (disabled by default for performance)
+    perf_cfg = config.get_performance_config()
+    if perf_cfg["enable_shadows"]:
+        flags |= pyrender.RenderFlags.SHADOWS_DIRECTIONAL
+
     renderer = _get_renderer(width, height)
 
     # Attempt to set line width if wireframe is enabled
@@ -204,15 +208,14 @@ def render_mesh(
         with contextlib.suppress(Exception):
             GL.glLineWidth(1.0)
 
-    # Convert to PNG bytes with alpha channel
-    image = Image.fromarray(color, mode="RGBA")
-    img_bytes = io.BytesIO()
-    image.save(img_bytes, format="PNG")
+    # Return raw RGBA bytes
+    # color is a numpy array of shape (height, width, 4) with dtype uint8
+    raw_bytes = color.tobytes()
 
     # Extract camera position from pose matrix
     camera_pos = tuple(camera_pose[:3, 3])
 
-    return img_bytes.getvalue(), camera_pos
+    return raw_bytes, camera_pos
 
 
 def _calculate_camera_pose(

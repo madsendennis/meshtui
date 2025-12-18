@@ -52,6 +52,25 @@ _orbital_target: tuple[float, float, float] = (0.0, 0.0, 0.0)  # Mesh center (AA
 _orbital_initial_radius: float = 1.0  # Store initial radius for reset
 
 
+def _get_default_up_vector_for_axis(view_axis: str) -> tuple[float, float, float]:
+    """Get the appropriate up vector for a given view axis to avoid gimbal lock.
+
+    Args:
+        view_axis: View axis ('+x', '-x', '+y', '-y', '+z', '-z')
+
+    Returns:
+        Appropriate up vector as (x, y, z)
+    """
+    axis = view_axis.lower()
+
+    # For Y-axis and X-axis views, use Z as up
+    if axis in ["+y", "-y", "+x", "-x"]:
+        return (0.0, 0.0, 1.0)
+
+    # For Z views (front/back), use Y as up
+    return (0.0, 1.0, 0.0)
+
+
 def _effective_up_vector(
     view_axis: str, up_override: tuple[float, float, float] | None
 ) -> tuple[float, float, float]:
@@ -124,6 +143,37 @@ def _initialize_orbital_camera(mesh: trimesh.Trimesh) -> None:
 
     _orbital_radius = distance
     _orbital_initial_radius = distance
+
+
+def _sync_orbital_from_camera() -> None:
+    """Synchronize orbital state from current camera position."""
+    global _orbital_theta, _orbital_phi, _orbital_radius
+
+    import math
+
+    cx, cy, cz = _camera_position
+    tx, ty, tz = _orbital_target
+
+    dx = cx - tx
+    dy = cy - ty
+    dz = cz - tz
+
+    # Radius
+    r = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if r < 1e-6:
+        r = 1.0
+
+    # Phi (angle from +Y)
+    # Clamp for acos safety
+    cos_phi = max(-1.0, min(1.0, dy / r))
+    phi = math.acos(cos_phi)
+
+    # Theta (angle in XZ plane)
+    theta = math.atan2(dz, dx)
+
+    _orbital_radius = r
+    _orbital_phi = phi
+    _orbital_theta = theta
 
 
 def handle_resize(signum: int, frame: Any) -> None:
@@ -244,7 +294,10 @@ def draw_help_menu(cols: int, rows: int) -> None:
 
 
 def render_and_display(
-    mesh: trimesh.Trimesh, clear_screen: bool = True, raise_errors: bool = False
+    mesh: trimesh.Trimesh,
+    clear_screen: bool = True,
+    raise_errors: bool = False,
+    force_redraw: bool = False,
 ) -> None:
     """Render and display the mesh at current terminal size.
 
@@ -253,6 +306,7 @@ def render_and_display(
         clear_screen: Whether to clear the screen before displaying
         raise_errors: Whether to raise exceptions (for initial render) or just print them
             (for resize)
+        force_redraw: Force redrawing the interface (e.g., when closing help menu)
     """
     global _last_render_params, _last_image_data, _camera_position
 
@@ -266,12 +320,9 @@ def render_and_display(
         print(f"Error: {e}", file=sys.stderr)
         return
 
-    if clear_screen:
-        # Clear screen
+    if clear_screen or force_redraw:
+        # Clear screen when explicitly requested or when forcing redraw
         print("\033[2J", end="", flush=True)
-
-    # Draw interface (border and footer)
-    draw_interface(cols, rows, mesh)
 
     # Calculate inner dimensions for the mesh
     # Subtract 2 for side borders
@@ -282,12 +333,18 @@ def render_and_display(
     inner_width_px = inner_cols * cell_w
     inner_height_px = inner_rows * cell_h
 
+    # Apply render scale for performance
+    perf_cfg = config.get_performance_config()
+    render_scale = perf_cfg["render_scale"]
+    render_width = max(1, int(inner_width_px * render_scale))
+    render_height = max(1, int(inner_height_px * render_scale))
+
     try:
         # Check if we need to re-render
         current_params = {
             "mesh_id": id(mesh),
-            "width": inner_width_px,
-            "height": inner_height_px,
+            "width": render_width,
+            "height": render_height,
             "axis": _view_axis,
             "wireframe": _wireframe_thickness,
             "up": _up_vector_override,
@@ -308,8 +365,8 @@ def render_and_display(
                 )
                 image_data, cam_pos = render_mesh(
                     mesh,
-                    inner_width_px,
-                    inner_height_px,
+                    render_width,
+                    render_height,
                     view_axis=_view_axis,
                     wireframe_thickness=_wireframe_thickness,
                     up_vector_override=effective_up,
@@ -319,8 +376,8 @@ def render_and_display(
             else:
                 image_data, cam_pos = render_mesh(
                     mesh,
-                    inner_width_px,
-                    inner_height_px,
+                    render_width,
+                    render_height,
                     view_axis=_view_axis,
                     wireframe_thickness=_wireframe_thickness,
                     up_vector_override=effective_up,
@@ -331,6 +388,9 @@ def render_and_display(
         else:
             image_data = _last_image_data
 
+        # Draw interface (border and footer) - AFTER rendering to get updated camera position
+        draw_interface(cols, rows, mesh)
+
         if _show_help:
             # When showing help, delete images and draw menu
             clear_images()
@@ -338,13 +398,15 @@ def render_and_display(
         else:
             # Move cursor to inside top-left (row 2, col 2)
             print("\033[2;2H", end="", flush=True)
-            # Display the image
+            # Display the image (overwriting existing image with ID 1)
+            # Note: render_width/height may be scaled down, display_image will handle upscaling
             display_image(
                 image_data,
-                inner_width_px,
-                inner_height_px,
+                render_width,
+                render_height,
                 cols=inner_cols,
                 rows=inner_rows,
+                image_id=1,
             )
 
     except Exception as e:
@@ -386,6 +448,7 @@ def wait_for_exit() -> None:
         old_settings = termios.tcgetattr(fd)
         try:
             tty.setraw(fd)
+
             while True:
                 # Check if resize is pending
                 if _resize_pending and _current_mesh is not None:
@@ -395,48 +458,48 @@ def wait_for_exit() -> None:
                 # Check for input with timeout to allow resize handling
                 import select
 
-                if select.select([sys.stdin], [], [], 0.1)[0]:
+                # Drain input buffer to prevent lag
+                needs_rerender: bool | str = False
+                while select.select([sys.stdin], [], [], 0.0)[0]:
                     char = sys.stdin.read(1)
 
-                    needs_rerender = False
-
                     if char == "q":
-                        break
+                        return  # Exit immediately
                     elif char == "x":
                         _view_axis = "+x"
-                        # Update orbital camera to match +X view
-                        _orbital_theta = 0.0
-                        _orbital_phi = math.pi / 2.0
+                        _orbital_active = False
+                        _up_vector_override = _get_default_up_vector_for_axis("+x")
+                        _up_vector_cycle_index = -1  # Reset cycle index
                         needs_rerender = True
                     elif char == "X":
                         _view_axis = "-x"
-                        # Update orbital camera to match -X view
-                        _orbital_theta = math.pi
-                        _orbital_phi = math.pi / 2.0
+                        _orbital_active = False
+                        _up_vector_override = _get_default_up_vector_for_axis("-x")
+                        _up_vector_cycle_index = -1  # Reset cycle index
                         needs_rerender = True
                     elif char == "y":
                         _view_axis = "+y"
-                        # Update orbital camera to match +Y view (top view)
-                        _orbital_theta = 0.0
-                        _orbital_phi = 0.1  # Clamped to avoid gimbal lock
+                        _orbital_active = False
+                        _up_vector_override = _get_default_up_vector_for_axis("+y")
+                        _up_vector_cycle_index = -1  # Reset cycle index
                         needs_rerender = True
                     elif char == "Y":
                         _view_axis = "-y"
-                        # Update orbital camera to match -Y view (bottom view)
-                        _orbital_theta = 0.0
-                        _orbital_phi = math.pi - 0.1  # Clamped to avoid gimbal lock
+                        _orbital_active = False
+                        _up_vector_override = _get_default_up_vector_for_axis("-y")
+                        _up_vector_cycle_index = -1  # Reset cycle index
                         needs_rerender = True
                     elif char == "z":
                         _view_axis = "+z"
-                        # Update orbital camera to match +Z view
-                        _orbital_theta = math.pi / 2.0
-                        _orbital_phi = math.pi / 2.0
+                        _orbital_active = False
+                        _up_vector_override = _get_default_up_vector_for_axis("+z")
+                        _up_vector_cycle_index = -1  # Reset cycle index
                         needs_rerender = True
                     elif char == "Z":
                         _view_axis = "-z"
-                        # Update orbital camera to match -Z view
-                        _orbital_theta = -math.pi / 2.0
-                        _orbital_phi = math.pi / 2.0
+                        _orbital_active = False
+                        _up_vector_override = _get_default_up_vector_for_axis("-z")
+                        _up_vector_cycle_index = -1  # Reset cycle index
                         needs_rerender = True
                     elif char == "G":
                         if _wireframe_thickness == 0.0:
@@ -462,33 +525,57 @@ def wait_for_exit() -> None:
                         _up_vector_override = _UP_VECTORS[_up_vector_cycle_index]
                         needs_rerender = True
                     elif char == "?":
+                        was_showing_help = _show_help
                         _show_help = not _show_help
                         needs_rerender = True
+                        # Force redraw when closing help to clear the menu text
+                        if was_showing_help and not _show_help:
+                            needs_rerender = "force_redraw"
                     elif char == "\x1b" and _show_help:  # Esc
                         _show_help = False
-                        needs_rerender = True
+                        needs_rerender = "force_redraw"  # Force redraw to clear help menu
                     # Orbital camera controls
                     elif char == "h":  # Orbit left (decrease theta)
+                        if not _orbital_active:
+                            if _current_mesh is not None:
+                                _initialize_orbital_camera(_current_mesh)
+                            _sync_orbital_from_camera()
                         _orbital_active = True
                         _orbital_theta -= _ORBITAL_CONFIG["movement_speed"]
                         needs_rerender = True
                     elif char == "l":  # Orbit right (increase theta)
+                        if not _orbital_active:
+                            if _current_mesh is not None:
+                                _initialize_orbital_camera(_current_mesh)
+                            _sync_orbital_from_camera()
                         _orbital_active = True
                         _orbital_theta += _ORBITAL_CONFIG["movement_speed"]
                         needs_rerender = True
                     elif char == "j":  # Orbit down (increase phi)
+                        if not _orbital_active:
+                            if _current_mesh is not None:
+                                _initialize_orbital_camera(_current_mesh)
+                            _sync_orbital_from_camera()
                         _orbital_active = True
                         _orbital_phi += _ORBITAL_CONFIG["movement_speed"]
                         # Clamp phi to avoid gimbal lock
                         _orbital_phi = max(0.1, min(math.pi - 0.1, _orbital_phi))
                         needs_rerender = True
                     elif char == "k":  # Orbit up (decrease phi)
+                        if not _orbital_active:
+                            if _current_mesh is not None:
+                                _initialize_orbital_camera(_current_mesh)
+                            _sync_orbital_from_camera()
                         _orbital_active = True
                         _orbital_phi -= _ORBITAL_CONFIG["movement_speed"]
                         # Clamp phi to avoid gimbal lock
                         _orbital_phi = max(0.1, min(math.pi - 0.1, _orbital_phi))
                         needs_rerender = True
                     elif char == "H":  # Orbit left fast
+                        if not _orbital_active:
+                            if _current_mesh is not None:
+                                _initialize_orbital_camera(_current_mesh)
+                            _sync_orbital_from_camera()
                         _orbital_active = True
                         _orbital_theta -= (
                             _ORBITAL_CONFIG["movement_speed"]
@@ -496,6 +583,10 @@ def wait_for_exit() -> None:
                         )
                         needs_rerender = True
                     elif char == "L":  # Orbit right fast
+                        if not _orbital_active:
+                            if _current_mesh is not None:
+                                _initialize_orbital_camera(_current_mesh)
+                            _sync_orbital_from_camera()
                         _orbital_active = True
                         _orbital_theta += (
                             _ORBITAL_CONFIG["movement_speed"]
@@ -503,6 +594,10 @@ def wait_for_exit() -> None:
                         )
                         needs_rerender = True
                     elif char == "J":  # Orbit down fast
+                        if not _orbital_active:
+                            if _current_mesh is not None:
+                                _initialize_orbital_camera(_current_mesh)
+                            _sync_orbital_from_camera()
                         _orbital_active = True
                         _orbital_phi += (
                             _ORBITAL_CONFIG["movement_speed"]
@@ -512,6 +607,10 @@ def wait_for_exit() -> None:
                         _orbital_phi = max(0.1, min(math.pi - 0.1, _orbital_phi))
                         needs_rerender = True
                     elif char == "K":  # Orbit up fast
+                        if not _orbital_active:
+                            if _current_mesh is not None:
+                                _initialize_orbital_camera(_current_mesh)
+                            _sync_orbital_from_camera()
                         _orbital_active = True
                         _orbital_phi -= (
                             _ORBITAL_CONFIG["movement_speed"]
@@ -521,10 +620,18 @@ def wait_for_exit() -> None:
                         _orbital_phi = max(0.1, min(math.pi - 0.1, _orbital_phi))
                         needs_rerender = True
                     elif char == "r":  # Zoom in
+                        if not _orbital_active:
+                            if _current_mesh is not None:
+                                _initialize_orbital_camera(_current_mesh)
+                            _sync_orbital_from_camera()
                         _orbital_active = True
                         _orbital_radius *= _ORBITAL_CONFIG["zoom_in_factor"]
                         needs_rerender = True
                     elif char == "R":  # Zoom out
+                        if not _orbital_active:
+                            if _current_mesh is not None:
+                                _initialize_orbital_camera(_current_mesh)
+                            _sync_orbital_from_camera()
                         _orbital_active = True
                         _orbital_radius *= _ORBITAL_CONFIG["zoom_out_factor"]
                         needs_rerender = True
@@ -538,8 +645,18 @@ def wait_for_exit() -> None:
                             _initialize_orbital_camera(_current_mesh)
                         needs_rerender = True
 
-                    if needs_rerender and _current_mesh is not None:
-                        render_and_display(_current_mesh, clear_screen=True)
+                if needs_rerender and _current_mesh is not None:
+                    # Handle force redraw (e.g., closing help menu)
+                    if needs_rerender == "force_redraw":
+                        render_and_display(_current_mesh, clear_screen=False, force_redraw=True)
+                    else:
+                        # Don't clear screen on interactive updates to avoid flickering
+                        render_and_display(_current_mesh, clear_screen=False)
+
+                # Sleep briefly to prevent CPU spinning if no input
+                import time
+
+                time.sleep(0.01)
 
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
