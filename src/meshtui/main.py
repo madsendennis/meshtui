@@ -5,8 +5,9 @@ import signal
 import sys
 import termios
 import tty
+from collections import defaultdict
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 import trimesh
 
@@ -43,6 +44,7 @@ class KeyDispatcher:
 
     def __init__(self, keybindings: dict[str, Any]):
         self.key_to_action: dict[str, str] = {}
+        self._action_to_display_keys: dict[str, list[str]] = defaultdict(list)
         self._build_key_map(keybindings)
 
     def _build_key_map(self, keybindings: dict[str, Any]) -> None:
@@ -56,6 +58,10 @@ class KeyDispatcher:
             for key in keys:
                 key_code = _SPECIAL_KEYS.get(key, key)
                 self.key_to_action[key_code] = action
+
+            # Also build display keys
+            for key in keys if isinstance(keys, list) else [keys]:
+                self._action_to_display_keys[action].append(key)
 
     def get_action(self, key: str) -> str | None:
         """Get the action for a given key press."""
@@ -379,6 +385,45 @@ _ACTION_DISPATCH = {
 # Initialize key dispatcher
 _key_dispatcher = KeyDispatcher(_KEYBINDINGS_CONFIG)
 
+
+class HelpItem(TypedDict):
+    actions: list[str]
+    description: str
+
+
+class HelpSection(TypedDict):
+    title: str
+    items: list[int]
+
+
+# Help menu configuration
+HELP_ITEMS: list[HelpItem] = [
+    {"actions": ["view_minus_x", "view_plus_x"], "description": "View from -/+ X axis"},
+    {"actions": ["view_minus_y", "view_plus_y"], "description": "View from -/+ Y axis"},
+    {"actions": ["view_minus_z", "view_plus_z"], "description": "View from -/+ Z axis"},
+    {"actions": ["up_vector_next", "up_vector_prev"], "description": "Cycle camera Up vector"},
+    {"actions": ["toggle_camera_type"], "description": "Toggle Perspective/Orthographic camera"},
+    {"actions": ["orbit_left", "orbit_right"], "description": "Orbit Left/Right"},
+    {"actions": ["orbit_down", "orbit_up"], "description": "Orbit Down/Up"},
+    {
+        "actions": ["orbit_left_fast", "orbit_right_fast", "orbit_down_fast", "orbit_up_fast"],
+        "description": "Fast orbit (5x speed)",
+    },
+    {"actions": ["zoom_in", "zoom_out"], "description": "Zoom In/Out"},
+    {"actions": ["reset_orbital"], "description": "Reset camera to default view"},
+    {"actions": ["light_decrease", "light_increase"], "description": "Light Intensity Down/Up"},
+    {"actions": ["wireframe_increase"], "description": "Grid ON increase wireframe thikness"},
+    {"actions": ["wireframe_off"], "description": "Grid OFF (solid)"},
+    {"actions": ["help_toggle"], "description": "Toggle this help menu"},
+    {"actions": ["quit"], "description": "Quit"},
+]
+
+HELP_SECTIONS: list[HelpSection] = [
+    {"title": "Controls:", "items": [0, 1, 2, 3, 4]},
+    {"title": "Orbital Camera (vim-style):", "items": [5, 6, 7, 8, 9]},
+    {"title": "", "items": [10, 11, 12, 13, 14]},
+]
+
 # Camera position tracking
 _camera_position: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
@@ -658,28 +703,29 @@ def draw_help_menu(cols: int, rows: int) -> None:
 
     up_text = _format_vec3(_effective_up_vector(_view_axis, _up_vector_override))
 
-    # Content
-    lines = [
-        "Controls:",
-        "  x/X : View from -/+ X axis",
-        "  y/Y : View from -/+ Y axis",
-        "  z/Z : View from -/+ Z axis",
-        f"  u/U : Cycle camera Up vector (current {up_text})",
-        "  w/W : Toggle Perspective/Orthographic camera",
-        "",
-        "Orbital Camera (vim-style):",
-        "  h/l : Orbit Left/Right",
-        "  j/k : Orbit Down/Up",
-        "  H/L/J/K : Fast orbit (5x speed)",
-        "  r/R : Zoom In/Out",
-        "  0   : Reset camera to default view",
-        "",
-        "  i/I : Light Intensity Down/Up",
-        "  G   : Grid ON (wireframe)",
-        "  g   : Grid OFF (solid)",
-        "  ?   : Toggle this help menu",
-        "  q   : Quit",
-    ]
+    # Generate content dynamically from config
+    lines = []
+    for section in HELP_SECTIONS:
+        if section["title"]:
+            lines.append(section["title"])
+        for item_idx in section["items"]:
+            item = HELP_ITEMS[item_idx]
+            actions = item["actions"]
+            keys = []
+            for action in actions:
+                keys.extend(_key_dispatcher._action_to_display_keys.get(action, []))
+            if not keys:
+                continue
+            keys_str = "/".join(keys)
+            desc = item["description"]
+            if "up_vector" in actions[0]:
+                desc = f"{desc} (current {up_text})"
+            lines.append(f"  {keys_str} : {desc}")
+        lines.append("")  # add blank after section
+
+    # Remove trailing empty line
+    if lines and lines[-1] == "":
+        lines.pop()
 
     # Calculate menu dimensions
     menu_width = 60
