@@ -11,23 +11,21 @@ from meshtui.main import main
 class TestMain:
     """Tests for CLI entry point."""
 
-    @patch("meshtui.main.signal.signal")
-    @patch("meshtui.main.wait_for_exit")
-    @patch("meshtui.main.render_and_display")
+    @patch("meshtui.main.TUI")
     @patch("meshtui.main.load_mesh")
     @patch("meshtui.main.get_terminal_size")
     def test_successful_execution(
         self,
         mock_get_size: MagicMock,
         mock_load: MagicMock,
-        mock_render_display: MagicMock,
-        mock_wait: MagicMock,
-        mock_signal: MagicMock,
+        mock_tui_cls: MagicMock,
     ) -> None:
         """Test successful mesh loading and display."""
         # Setup mocks
         mock_get_size.return_value = (800, 600, 10, 20)
         mock_load.return_value = trimesh.creation.box()
+
+        mock_tui_instance = mock_tui_cls.return_value
 
         # Call main with Path directly
         result = main(Path("test.ply"))
@@ -35,9 +33,8 @@ class TestMain:
         assert result == 0
         mock_get_size.assert_called_once()
         mock_load.assert_called_once()
-        mock_render_display.assert_called_once()
-        mock_wait.assert_called_once()
-        mock_signal.assert_called_once()  # SIGWINCH handler registered
+        mock_tui_cls.assert_called_once_with(mock_load.return_value)
+        mock_tui_instance.run.assert_called_once()
 
     @patch("meshtui.main.load_mesh")
     @patch("meshtui.main.get_terminal_size")
@@ -72,48 +69,21 @@ class TestMain:
 
         assert result == 1
 
-    @patch("meshtui.main.render_mesh")
+    @patch("meshtui.main.TUI")
     @patch("meshtui.main.load_mesh")
     @patch("meshtui.main.get_terminal_size")
-    @patch("meshtui.main.setup_tui")
-    @patch("meshtui.main.cleanup_tui")
-    def test_render_error(
+    def test_tui_error(
         self,
-        mock_cleanup: MagicMock,
-        mock_setup: MagicMock,
         mock_get_size: MagicMock,
         mock_load: MagicMock,
-        mock_render: MagicMock,
+        mock_tui_cls: MagicMock,
     ) -> None:
-        """Test error during rendering."""
+        """Test error during TUI execution."""
         mock_get_size.return_value = (800, 600, 10, 20)
         mock_load.return_value = trimesh.creation.box()
-        mock_render.side_effect = Exception("Render failed")
 
-        result = main(Path("test.ply"))
-
-        assert result == 1
-
-    @patch("meshtui.main.display_image")
-    @patch("meshtui.main.render_mesh")
-    @patch("meshtui.main.load_mesh")
-    @patch("meshtui.main.get_terminal_size")
-    @patch("meshtui.main.setup_tui")
-    @patch("meshtui.main.cleanup_tui")
-    def test_display_error(
-        self,
-        mock_cleanup: MagicMock,
-        mock_setup: MagicMock,
-        mock_get_size: MagicMock,
-        mock_load: MagicMock,
-        mock_render: MagicMock,
-        mock_display: MagicMock,
-    ) -> None:
-        """Test error during display."""
-        mock_get_size.return_value = (800, 600, 10, 20)
-        mock_load.return_value = trimesh.creation.box()
-        mock_render.return_value = b"fake_png_data"
-        mock_display.side_effect = RuntimeError("Display failed")
+        mock_tui_instance = mock_tui_cls.return_value
+        mock_tui_instance.run.side_effect = Exception("TUI failed")
 
         result = main(Path("test.ply"))
 
@@ -129,33 +99,3 @@ class TestMain:
         result = main(Path("test.ply"))
 
         assert result == 0
-
-    @patch("meshtui.main.signal.signal")
-    @patch("meshtui.main.wait_for_exit")
-    @patch("meshtui.main.render_and_display")
-    @patch("meshtui.main.load_mesh")
-    @patch("meshtui.main.get_terminal_size")
-    @patch("meshtui.main.setup_tui")
-    @patch("meshtui.main.cleanup_tui")
-    def test_mesh_info_displayed(
-        self,
-        mock_cleanup: MagicMock,
-        mock_setup: MagicMock,
-        mock_get_size: MagicMock,
-        mock_load: MagicMock,
-        mock_render_display: MagicMock,
-        mock_wait: MagicMock,
-        mock_signal: MagicMock,
-    ) -> None:
-        """Test that mesh info (vertices, faces) is printed."""
-        mesh = trimesh.creation.box()
-        mock_get_size.return_value = (800, 600, 10, 20)
-        mock_load.return_value = mesh
-
-        with patch("builtins.print") as mock_print:
-            result = main(Path("test.ply"))
-
-        assert result == 0
-        # Check that mesh info was printed (in render_and_display)
-        print_calls = [str(call) for call in mock_print.call_args_list]
-        assert any("Loading mesh" in str(call) for call in print_calls)

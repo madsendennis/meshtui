@@ -15,7 +15,7 @@ zoom_in_factor = 0.9                   # Multiplier for 'r' key (zoom in)
 zoom_out_factor = 1.1                  # Multiplier for 'R' key (zoom out)
 initial_theta = 0.0                    # Initial horizontal angle in radians
 initial_phi = 1.57                     # Initial vertical angle in radians (pi/2 = 90 degrees)
-smoothing_factor = 0.8                 # Camera smoothing factor (0.1-1.0, higher is faster)
+smoothing_factor = 0.6                 # Camera smoothing factor (0.1-1.0, higher is faster)
 
 [view]
 # Default view settings
