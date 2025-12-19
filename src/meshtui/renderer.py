@@ -228,6 +228,45 @@ def render_mesh(
     # Position camera and orient it to look at target with proper up vector
     import pylinalg as la
 
+    # Ensure up vector is normalized and valid
+    up_norm = np.linalg.norm(up)
+    if up_norm < 1e-6:
+        # Fallback to default up vector if current one is too small
+        up = np.array([0.0, 1.0, 0.0])
+        up_norm = 1.0
+    else:
+        up = up / up_norm
+
+    # Ensure camera position and target are not identical
+    view_dir = target - camera_pos
+    view_distance = np.linalg.norm(view_dir)
+    if view_distance < 1e-6:
+        # Move camera slightly away if it's at the target
+        camera_pos = camera_pos + np.array([0.0, 0.0, max_extent * 0.1])
+        view_dir = target - camera_pos
+        view_distance = np.linalg.norm(view_dir)
+
+    # Normalize view direction
+    view_dir_norm = view_dir / view_distance
+
+    # Check if up vector is parallel to view direction (causing singularity in mat_look_at)
+    # This happens when dot product is close to ±1
+    dot_product = abs(float(np.dot(view_dir_norm, up)))
+    if dot_product > 0.99:
+        # Up vector is nearly parallel to view direction - choose perpendicular up
+        # Use cross product with a perpendicular axis to get a valid up vector
+        if abs(view_dir_norm[0]) < 0.9:
+            # View direction is not along X, so use X as reference
+            perpendicular = np.array([1.0, 0.0, 0.0])
+        else:
+            # View direction is along X, use Y as reference
+            perpendicular = np.array([0.0, 1.0, 0.0])
+
+        # Create a perpendicular up vector using cross product
+        up = np.cross(np.cross(view_dir_norm, perpendicular), view_dir_norm)
+        up_norm_val = np.linalg.norm(up)
+        up = up / up_norm_val if up_norm_val > 1e-6 else np.array([0.0, 1.0, 0.0])
+
     # Use mat_look_at(target, eye, up) to align -Z (forward) towards target
     view_matrix = la.mat_look_at(target, camera_pos, up)
     view_matrix[:3, 3] = camera_pos
@@ -236,18 +275,18 @@ def render_mesh(
 
     # Compute safe up vector for lights to avoid gimbal lock
     # If view direction is nearly parallel to up vector, use an alternate up vector
-    view_dir = target - camera_pos
-    view_dir_norm = view_dir / np.linalg.norm(view_dir)
-    up_norm = up / np.linalg.norm(up)
+    up_norm_vec = up
 
     # Check if view direction and up vector are nearly parallel (dot product close to ±1)
-    dot_product = abs(float(np.dot(view_dir_norm, up_norm)))
+    dot_product = abs(float(np.dot(view_dir_norm, up_norm_vec)))
     if dot_product > 0.95:  # Nearly parallel
         # Choose an alternate up vector perpendicular to view direction
         # If current up is Y-up, use Z-up; if Z-up, use Y-up
-        light_up = np.array([0.0, 0.0, 1.0]) if abs(up[1]) > 0.5 else np.array([0.0, 1.0, 0.0])
+        light_up = (
+            np.array([0.0, 0.0, 1.0]) if abs(up_norm_vec[1]) > 0.5 else np.array([0.0, 1.0, 0.0])
+        )
     else:
-        light_up = up
+        light_up = up_norm_vec
 
     # Add lighting - always enabled so both solid mesh and wireframe can be seen together
     # Ambient light

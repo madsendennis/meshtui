@@ -27,8 +27,8 @@ class TestMain:
 
         mock_tui_instance = mock_tui_cls.return_value
 
-        # Call main with list of Paths
-        result = main([Path("test.ply")])
+        # Call main with list of Paths and empty screenshot arg
+        result = main([Path("test.ply")], screenshot="")
 
         assert result == 0
         mock_get_size.assert_called_once()
@@ -43,7 +43,7 @@ class TestMain:
         mock_get_size.return_value = (800, 600, 10, 20)
         mock_load.side_effect = ValueError("No valid meshes found")
 
-        result = main([Path("nonexistent.ply")])
+        result = main([Path("nonexistent.ply")], screenshot="")
 
         assert result == 1
 
@@ -54,7 +54,7 @@ class TestMain:
             "Terminal does not support the Kitty graphics protocol"
         )
 
-        result = main([Path("test.ply")])
+        result = main([Path("test.ply")], screenshot="")
 
         assert result == 1
 
@@ -65,7 +65,7 @@ class TestMain:
         mock_get_size.return_value = (800, 600, 10, 20)
         mock_load.side_effect = ValueError("Unsupported file format")
 
-        result = main([Path("model.obj")])
+        result = main([Path("model.obj")], screenshot="")
 
         assert result == 1
 
@@ -85,7 +85,7 @@ class TestMain:
         mock_tui_instance = mock_tui_cls.return_value
         mock_tui_instance.run.side_effect = Exception("TUI failed")
 
-        result = main([Path("test.ply")])
+        result = main([Path("test.ply")], screenshot="")
 
         assert result == 1
 
@@ -96,6 +96,6 @@ class TestMain:
         mock_get_size.return_value = (800, 600, 10, 20)
         mock_load.side_effect = KeyboardInterrupt()
 
-        result = main([Path("test.ply")])
+        result = main([Path("test.ply")], screenshot="")
 
         assert result == 0

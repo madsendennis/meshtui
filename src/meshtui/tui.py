@@ -12,6 +12,7 @@ import trimesh
 
 from meshtui import config
 from meshtui.camera import Camera, OrthographicCamera, PerspectiveCamera
+from meshtui.camera_setup import calculate_camera_distance, calculate_camera_parameters
 from meshtui.kitty_protocol import (
     clear_images,
     display_image,
@@ -150,34 +151,25 @@ class TUI:
         self.camera_position = (0.0, 0.0, 0.0)
 
     def _initialize_camera(self):
-        # Calculate combined AABB center
-        combined_min = np.array([np.inf, np.inf, np.inf])
-        combined_max = np.array([-np.inf, -np.inf, -np.inf])
-        has_meshes = False
-
-        for mesh in self.meshes:
-            has_meshes = True
-            combined_min = np.minimum(combined_min, mesh.bounds[0])
-            combined_max = np.maximum(combined_max, mesh.bounds[1])
-
-        if has_meshes:
-            center = (combined_min + combined_max) / 2.0
-            extents = combined_max - combined_min
-            max_extent = float(np.max(extents))
-        else:
+        if not self.meshes:
+            # Fallback for empty mesh list
             center = np.array([0.0, 0.0, 0.0])
             max_extent = 1.0
+        else:
+            # Use shared camera setup logic
+            center, max_extent = calculate_camera_parameters(
+                self.meshes, self.camera_config["distance_padding"]
+            )
 
         self.camera.set_target(tuple(center))
 
-        # Calculate initial radius
-        fov_radians = np.radians(self.camera_config["fov_degrees"])
-        tan_half_fov = float(np.tan(fov_radians / 2.0))
-        if not np.isfinite(tan_half_fov) or tan_half_fov <= 0.0:
-            tan_half_fov = 1e-6
-        distance = (max_extent / tan_half_fov) * self.camera_config["distance_padding"]
-        if not np.isfinite(distance) or distance <= 0.0:
-            distance = 1.0
+        # Calculate camera distance based on camera type
+        distance = calculate_camera_distance(
+            max_extent,
+            self.camera_config["distance_padding"],
+            self.camera_config["fov_degrees"],
+            self.camera.get_type(),
+        )
 
         self.camera.set_radius(distance)
         self.camera.set_view_axis(self.view_axis)
