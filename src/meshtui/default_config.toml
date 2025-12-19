@@ -15,7 +15,7 @@ zoom_in_factor = 0.9                   # Multiplier for 'r' key (zoom in)
 zoom_out_factor = 1.1                  # Multiplier for 'R' key (zoom out)
 initial_theta = 0.0                    # Initial horizontal angle in radians
 initial_phi = 1.57                     # Initial vertical angle in radians (pi/2 = 90 degrees)
-smoothing_factor = 0.6                 # Camera smoothing factor (0.1-1.0, higher is faster)
+smoothing_factor = 0.8                 # Camera smoothing factor (0.1-1.0, higher is faster)
 
 [view]
 # Default view settings
@@ -25,8 +25,6 @@ default_axis = "+y"                    # Default view axis: +x, -x, +y, -y, +z, 
 up_vectors = [ # First index is default
     [0.0, 1.0, 0.0],   # Y-up
     [0.0, 0.0, 1.0],   # Z-up
-    [0.0, -1.0, 0.0],   # Y-down
-    [0.0, 0.0, -1.0],   # Z-down
 ]
 
 [material]
@@ -60,7 +58,15 @@ color_light_bg = [20, 20, 20, 255]     # Dark grey wireframe for light backgroun
 [performance]
 # Performance optimization settings
 # Note: Already optimized - uses raw RGBA transfer (no PNG encoding overhead)
-render_scale = 0.5                     # Resolution scale for rendering (0.1-1.0, lower = faster)
+# Progressive rendering settings:
+# 1. Interaction: Used while moving/interacting (fastest)
+# 2. Intermediate: Used shortly after interaction stops
+# 3. High: Used for final static image
+render_resolution_interaction = 500    # Resolution for interaction (max dimension)
+render_resolution_intermediate = 800   # Resolution for intermediate step (max dimension)
+render_resolution_high = 1500          # Resolution for final static image (max dimension)
+render_timeout_interaction = 0.01      # Time in seconds to wait before upgrading from interaction to intermediate
+render_timeout_intermediate = 0.02     # Time in seconds to wait before upgrading from intermediate to high
                                        # Rendered image is upscaled by Kitty protocol to full display size
 enable_shadows = true                  # Enable shadows from directional lights (costs performance)
 

@@ -46,7 +46,8 @@ class TestCamera:
         initial_radius = cam.radius
         cam.zoom(0.5)
         cam.animate(1.0)
-        assert cam.radius == initial_radius * 0.5
+        # Zoom factor 0.5 means divide radius by 0.5 (multiply by 2)
+        assert cam.radius == initial_radius / 0.5
 
     def test_zoom_orthographic(self):
         cam = OrthographicCamera()

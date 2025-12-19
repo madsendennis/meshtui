@@ -1,3 +1,5 @@
+import fcntl
+import os
 import select
 import signal
 import sys
@@ -118,6 +120,7 @@ class TUI:
         self.orbital_config = config.get_orbital_camera_config()
         self.lighting_config = config.get_lighting_config()
         self.keybindings_config = config.get_keybindings_config()
+        self.performance_config = config.get_performance_config()
 
         # State
         self.wireframe_thickness = self.wireframe_config["default_thickness"]
@@ -148,9 +151,11 @@ class TUI:
         self.last_image_data: bytes | None = None
         self.last_render_width: int = 0
         self.last_render_height: int = 0
+        self.render_level = 2  # Start at high quality (0=Interaction, 1=Intermediate, 2=High)
+
         self.camera_position = (0.0, 0.0, 0.0)
 
-    def _initialize_camera(self):
+    def _initialize_camera(self, reset_only_zoom=False):
         if not self.meshes:
             # Fallback for empty mesh list
             center = np.array([0.0, 0.0, 0.0])
@@ -161,7 +166,8 @@ class TUI:
                 self.meshes, self.camera_config["distance_padding"]
             )
 
-        self.camera.set_target(tuple(center))
+        if not reset_only_zoom:
+            self.camera.set_target(tuple(center))
 
         # Calculate camera distance based on camera type
         distance = calculate_camera_distance(
@@ -172,7 +178,16 @@ class TUI:
         )
 
         self.camera.set_radius(distance)
-        self.camera.set_view_axis(self.view_axis)
+        if not reset_only_zoom:
+            self.camera.set_view_axis(self.view_axis)
+
+        self.camera.reset_zoom()
+
+        # Self-pipe for signal handling
+        self._resize_pipe_r, self._resize_pipe_w = os.pipe()
+        # Set non-blocking
+        flags = fcntl.fcntl(self._resize_pipe_r, fcntl.F_GETFL)
+        fcntl.fcntl(self._resize_pipe_r, fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
     def run(self):
         # Set up signal handler
@@ -188,9 +203,16 @@ class TUI:
             sys.exit(1)
         finally:
             self._cleanup_tui()
+            # Close pipe
+            with suppress(OSError):
+                os.close(self._resize_pipe_r)
+                os.close(self._resize_pipe_w)
 
     def _handle_resize(self, signum, frame):
         self.resize_pending = True
+        # Write to pipe to wake up select
+        with suppress(OSError):
+            os.write(self._resize_pipe_w, b"\x00")
 
     def _setup_tui(self):
         sys.stdout.write("\033[?1049h")  # Enter alternate screen buffer
@@ -211,37 +233,75 @@ class TUI:
             old_settings = termios.tcgetattr(fd)
             try:
                 tty.setraw(fd)
+
                 while True:
                     if self.resize_pending:
                         self.resize_pending = False
-                        self.render_and_display(clear_screen=True)
+                        self.render_level = 0
+                        self.render_and_display(clear_screen=True, render_level=0)
 
                     # Animation step
                     smoothing = self.orbital_config.get("smoothing_factor", 0.6)
                     is_animating = self.camera.animate(smoothing)
 
                     if is_animating:
-                        self.render_and_display(clear_screen=False)
+                        self.render_level = 0
+                        self.render_and_display(clear_screen=False, render_level=0)
                         timeout = 0.0  # Don't block if animating
                     else:
-                        timeout = 0.1  # Block briefly if idle
+                        # Determine timeout based on render level
+                        if self.render_level < 2:
+                            # Level 0 -> 1: Very Fast (default 0.01s)
+                            # Level 1 -> 2: Fast (default 0.05s)
+                            if self.render_level == 0:
+                                timeout = self.performance_config.get(
+                                    "render_timeout_interaction", 0.01
+                                )
+                            else:
+                                timeout = self.performance_config.get(
+                                    "render_timeout_intermediate", 0.05
+                                )
+                        else:
+                            timeout = None  # Block indefinitely if fully rendered
 
                     # Use a timeout to allow checking for resize events if select is not interrupted
                     try:
-                        rlist, _, _ = select.select([sys.stdin], [], [], timeout)
+                        rlist, _, _ = select.select(
+                            [sys.stdin, self._resize_pipe_r], [], [], timeout
+                        )
                     except OSError:
                         # Likely interrupted by signal (resize)
                         continue
 
-                    if rlist:
+                    if self._resize_pipe_r in rlist:
+                        # Drain pipe
+                        with suppress(OSError):
+                            os.read(self._resize_pipe_r, 1024)
+                        self.resize_pending = True
+                        continue
+
+                    if not rlist:
+                        # Timeout: Upgrade resolution if not animating
+                        if not is_animating and self.render_level < 2:
+                            self.render_level += 1
+                            self.render_and_display(
+                                clear_screen=False, render_level=self.render_level
+                            )
+                        continue
+
+                    if sys.stdin in rlist:
+                        # Process input
                         char = sys.stdin.read(1)
                         action = self.key_dispatcher.get_action(char)
+
                         if action:
                             should_redraw = self._handle_action(action)
                             if should_redraw:
+                                self.render_level = 0
                                 self.render_and_display(
                                     clear_screen=False,
                                     force_redraw=(should_redraw == "force_redraw"),
+                                    render_level=0,
                                 )
 
             finally:
@@ -266,6 +326,8 @@ class TUI:
             axis = action.replace("view_", "").replace("plus_", "+").replace("minus_", "-")
             self.camera.set_view_axis(axis)  # type: ignore
             self.view_axis = axis
+            # Reset zoom when switching views
+            self._initialize_camera(reset_only_zoom=True)
             return True
 
         if action == "toggle_camera_type":
@@ -378,7 +440,9 @@ class TUI:
 
         return False
 
-    def render_and_display(self, clear_screen=True, raise_errors=False, force_redraw=False):
+    def render_and_display(
+        self, clear_screen=True, raise_errors=False, force_redraw=False, render_level=2
+    ):
         try:
             width_px, height_px, cell_w, cell_h = get_terminal_size()
             cols = width_px // cell_w
@@ -397,10 +461,22 @@ class TUI:
         inner_width_px = inner_cols * cell_w
         inner_height_px = inner_rows * cell_h
 
-        perf_cfg = config.get_performance_config()
-        render_scale = perf_cfg["render_scale"]
-        render_width = max(1, int(inner_width_px * render_scale))
-        render_height = max(1, int(inner_height_px * render_scale))
+        perf_cfg = self.performance_config
+
+        # Determine max dimension based on render level
+        if render_level == 0:
+            max_dim = perf_cfg["render_resolution_interaction"]
+        elif render_level == 1:
+            max_dim = perf_cfg["render_resolution_intermediate"]
+        else:
+            max_dim = perf_cfg["render_resolution_high"]
+
+        # Calculate scale to fit within max_dim while maintaining aspect ratio
+        # We only scale down, never up (if terminal is smaller than max_dim, use native resolution)
+        scale = min(1.0, max_dim / max(inner_width_px, inner_height_px))
+
+        render_width = max(1, int(inner_width_px * scale))
+        render_height = max(1, int(inner_height_px * scale))
 
         try:
             # Check if we need to re-render

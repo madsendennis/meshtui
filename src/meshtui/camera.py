@@ -40,6 +40,11 @@ class Camera(ABC):
         pass
 
     @abstractmethod
+    def reset_zoom(self) -> None:
+        """Reset zoom level to default."""
+        pass
+
+    @abstractmethod
     def animate(self, smoothing_factor: float = 0.1) -> bool:
         """Animate camera towards target state. Returns True if updated."""
         pass
@@ -161,7 +166,11 @@ class PerspectiveCamera(Camera):
 
     def zoom(self, factor: float) -> None:
         """Zoom by changing the orbital radius."""
-        self.target_radius *= factor
+        self.target_radius /= factor
+
+    def reset_zoom(self) -> None:
+        """Reset zoom level (handled by set_radius for perspective)."""
+        pass
 
     def animate(self, smoothing_factor: float = 0.1) -> bool:
         return self._animate_orbital(smoothing_factor)
@@ -181,6 +190,11 @@ class OrthographicCamera(Camera):
         # For ortho, "zoom in" means smaller view volume, so we multiply by factor
         # If factor < 1 (zoom in), zoom_level decreases.
         self.target_zoom_level *= factor
+
+    def reset_zoom(self) -> None:
+        """Reset zoom level to default."""
+        self.zoom_level = 1.0
+        self.target_zoom_level = 1.0
 
     def animate(self, smoothing_factor: float = 0.1) -> bool:
         updated = self._animate_orbital(smoothing_factor)
