@@ -6,27 +6,26 @@ from pathlib import Path
 import typer
 
 from meshtui.kitty_protocol import get_terminal_size
-from meshtui.mesh_loader import load_mesh
+from meshtui.mesh_loader import load_meshes
 from meshtui.tui import TUI
 
 
 def main(
-    mesh_file: Path = typer.Argument(  # noqa: B008
+    mesh_files: list[Path] = typer.Argument(  # noqa: B008
         ...,
-        help="Path to the mesh file to display (supports .ply, .stl, .obj, .drc, .glb)",
+        help="Path to mesh file(s) or directory to display (supports .ply, .stl, .obj, .drc, .glb)",
     ),
 ) -> int:
     """Terminal-based 3D mesh viewer using Kitty graphics protocol.
 
-    Load a 3D mesh file and interactively view it in your terminal with
+    Load one or more 3D mesh files and interactively view them in your terminal with
     orbital camera controls, wireframe rendering, and lighting adjustments.
 
     Examples:
         meshtui model.ply
-        meshtui path/to/mesh.stl
+        meshtui part1.stl part2.stl
+        meshtui ./models_directory/
     """
-    mesh_path = mesh_file
-
     try:
         # Check terminal compatibility
         try:
@@ -35,19 +34,16 @@ def main(
             print(f"Error: {e}", file=sys.stderr)
             return 1
 
-        # Load mesh
-        print(f"Loading mesh: {mesh_path}")
+        # Load meshes
+        print(f"Loading meshes from: {', '.join(str(p) for p in mesh_files)}")
         try:
-            mesh = load_mesh(mesh_path)
-        except FileNotFoundError:
-            print(f"Error: File not found: {mesh_path}", file=sys.stderr)
-            return 1
+            meshes = load_meshes(mesh_files)
         except ValueError as e:
             print(f"Error: {e}", file=sys.stderr)
             return 1
 
         # Initialize and run TUI
-        tui = TUI(mesh)
+        tui = TUI(meshes)
         tui.run()
 
         return 0

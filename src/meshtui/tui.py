@@ -98,8 +98,12 @@ HELP_SECTIONS: list[HelpSection] = [
 
 
 class TUI:
-    def __init__(self, mesh: trimesh.Trimesh):
-        self.mesh = mesh
+    def __init__(self, meshes: list[trimesh.Trimesh] | trimesh.Trimesh):
+        if isinstance(meshes, trimesh.Trimesh):
+            self.meshes = [meshes]
+        else:
+            self.meshes = meshes
+
         self.resize_pending = False
         self.show_help = False
 
@@ -141,16 +145,27 @@ class TUI:
         self.camera_position = (0.0, 0.0, 0.0)
 
     def _initialize_camera(self):
-        # Calculate AABB center
-        bounds = self.mesh.bounds
-        aabb_min = bounds[0]
-        aabb_max = bounds[1]
-        center = (aabb_min + aabb_max) / 2.0
+        # Calculate combined AABB center
+        combined_min = np.array([np.inf, np.inf, np.inf])
+        combined_max = np.array([-np.inf, -np.inf, -np.inf])
+        has_meshes = False
+
+        for mesh in self.meshes:
+            has_meshes = True
+            combined_min = np.minimum(combined_min, mesh.bounds[0])
+            combined_max = np.maximum(combined_max, mesh.bounds[1])
+
+        if has_meshes:
+            center = (combined_min + combined_max) / 2.0
+            extents = combined_max - combined_min
+            max_extent = float(np.max(extents))
+        else:
+            center = np.array([0.0, 0.0, 0.0])
+            max_extent = 1.0
+
         self.camera.set_target(tuple(center))
 
         # Calculate initial radius
-        extents = aabb_max - aabb_min
-        max_extent = float(np.max(extents))
         fov_radians = np.radians(self.camera_config["fov_degrees"])
         tan_half_fov = float(np.tan(fov_radians / 2.0))
         if not np.isfinite(tan_half_fov) or tan_half_fov <= 0.0:
@@ -389,7 +404,7 @@ class TUI:
         try:
             # Check if we need to re-render
             current_params = {
-                "mesh_id": id(self.mesh),
+                "mesh_ids": tuple(id(m) for m in self.meshes),
                 "width": render_width,
                 "height": render_height,
                 "wireframe": self.wireframe_thickness,
@@ -405,7 +420,7 @@ class TUI:
 
             if current_params != self.last_render_params or self.last_image_data is None:
                 image_data, cam_pos = render_mesh(
-                    self.mesh,
+                    self.meshes,
                     render_width,
                     render_height,
                     view_axis=self.view_axis,  # Still needed for some renderer logic?
@@ -477,10 +492,14 @@ class TUI:
         )
 
         right_text = ""
-        if self.mesh is not None:
-            v_count = len(self.mesh.vertices)
-            f_count = len(self.mesh.faces)
-            right_text = f"V: {v_count} | F: {f_count} "
+        if self.meshes:
+            v_count = sum(len(m.vertices) for m in self.meshes)
+            f_count = sum(len(m.faces) for m in self.meshes)
+            mesh_count = len(self.meshes)
+            if mesh_count > 1:
+                right_text = f"M: {mesh_count} | V: {v_count} | F: {f_count} "
+            else:
+                right_text = f"V: {v_count} | F: {f_count} "
 
         available_space = cols - len(left_text) - len(right_text)
         if available_space < 0:

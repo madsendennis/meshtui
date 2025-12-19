@@ -12,7 +12,7 @@ class TestMain:
     """Tests for CLI entry point."""
 
     @patch("meshtui.main.TUI")
-    @patch("meshtui.main.load_mesh")
+    @patch("meshtui.main.load_meshes")
     @patch("meshtui.main.get_terminal_size")
     def test_successful_execution(
         self,
@@ -23,12 +23,12 @@ class TestMain:
         """Test successful mesh loading and display."""
         # Setup mocks
         mock_get_size.return_value = (800, 600, 10, 20)
-        mock_load.return_value = trimesh.creation.box()
+        mock_load.return_value = [trimesh.creation.box()]
 
         mock_tui_instance = mock_tui_cls.return_value
 
-        # Call main with Path directly
-        result = main(Path("test.ply"))
+        # Call main with list of Paths
+        result = main([Path("test.ply")])
 
         assert result == 0
         mock_get_size.assert_called_once()
@@ -36,14 +36,14 @@ class TestMain:
         mock_tui_cls.assert_called_once_with(mock_load.return_value)
         mock_tui_instance.run.assert_called_once()
 
-    @patch("meshtui.main.load_mesh")
+    @patch("meshtui.main.load_meshes")
     @patch("meshtui.main.get_terminal_size")
     def test_missing_file(self, mock_get_size: MagicMock, mock_load: MagicMock) -> None:
         """Test error when file doesn't exist."""
         mock_get_size.return_value = (800, 600, 10, 20)
-        mock_load.side_effect = FileNotFoundError("File not found")
+        mock_load.side_effect = ValueError("No valid meshes found")
 
-        result = main(Path("nonexistent.ply"))
+        result = main([Path("nonexistent.ply")])
 
         assert result == 1
 
@@ -54,23 +54,23 @@ class TestMain:
             "Terminal does not support the Kitty graphics protocol"
         )
 
-        result = main(Path("test.ply"))
+        result = main([Path("test.ply")])
 
         assert result == 1
 
-    @patch("meshtui.main.load_mesh")
+    @patch("meshtui.main.load_meshes")
     @patch("meshtui.main.get_terminal_size")
     def test_unsupported_format(self, mock_get_size: MagicMock, mock_load: MagicMock) -> None:
         """Test error for unsupported file format."""
         mock_get_size.return_value = (800, 600, 10, 20)
         mock_load.side_effect = ValueError("Unsupported file format")
 
-        result = main(Path("model.obj"))
+        result = main([Path("model.obj")])
 
         assert result == 1
 
     @patch("meshtui.main.TUI")
-    @patch("meshtui.main.load_mesh")
+    @patch("meshtui.main.load_meshes")
     @patch("meshtui.main.get_terminal_size")
     def test_tui_error(
         self,
@@ -80,22 +80,22 @@ class TestMain:
     ) -> None:
         """Test error during TUI execution."""
         mock_get_size.return_value = (800, 600, 10, 20)
-        mock_load.return_value = trimesh.creation.box()
+        mock_load.return_value = [trimesh.creation.box()]
 
         mock_tui_instance = mock_tui_cls.return_value
         mock_tui_instance.run.side_effect = Exception("TUI failed")
 
-        result = main(Path("test.ply"))
+        result = main([Path("test.ply")])
 
         assert result == 1
 
-    @patch("meshtui.main.load_mesh")
+    @patch("meshtui.main.load_meshes")
     @patch("meshtui.main.get_terminal_size")
     def test_keyboard_interrupt(self, mock_get_size: MagicMock, mock_load: MagicMock) -> None:
         """Test handling of keyboard interrupt."""
         mock_get_size.return_value = (800, 600, 10, 20)
         mock_load.side_effect = KeyboardInterrupt()
 
-        result = main(Path("test.ply"))
+        result = main([Path("test.ply")])
 
         assert result == 0

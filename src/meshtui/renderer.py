@@ -35,7 +35,7 @@ def _get_renderer(width: int, height: int) -> tuple[gfx.renderers.WgpuRenderer, 
 
 
 def render_mesh(
-    mesh: trimesh.Trimesh,
+    meshes: list[trimesh.Trimesh] | trimesh.Trimesh,
     width: int,
     height: int,
     view_axis: str = "+z",
@@ -47,14 +47,14 @@ def render_mesh(
     light_intensity: float | None = None,
     ortho_zoom: float = 1.0,
 ) -> tuple[bytes, tuple[float, float, float]]:
-    """Render a mesh to raw RGBA image data.
+    """Render one or more meshes to raw RGBA image data.
 
-    Creates a scene with the mesh, camera, and lighting, then renders it
+    Creates a scene with the mesh(es), camera, and lighting, then renders it
     to a raw RGBA buffer suitable for display in the terminal. Uses transparent
     background to match terminal and adjusts mesh color for contrast.
 
     Args:
-        mesh: The trimesh object to render
+        meshes: A single trimesh object or a list of them
         width: Image width in pixels
         height: Image height in pixels
         view_axis: Camera view axis ('+x', '-x', '+y', '-y', '+z', '-z')
@@ -74,6 +74,9 @@ def render_mesh(
     """
     if width <= 0 or height <= 0:
         raise ValueError(f"Invalid dimensions: {width}x{height}")
+
+    # Normalize input to list
+    mesh_list = [meshes] if isinstance(meshes, trimesh.Trimesh) else meshes
 
     # Load configuration
     wireframe_cfg = config.get_wireframe_config()
@@ -105,51 +108,66 @@ def render_mesh(
     background = gfx.Background.from_color(bg_color_normalized)
     scene.add(background)
 
-    # Convert trimesh to pygfx geometry
-    positions = mesh.vertices.astype(np.float32)
-    indices = mesh.faces.astype(np.uint32)
+    # Initialize bounds
+    combined_bounds_min = np.array([np.inf, np.inf, np.inf])
+    combined_bounds_max = np.array([-np.inf, -np.inf, -np.inf])
+    has_meshes = False
 
-    # Compute normals using trimesh (requires scipy for weighted vertex normals)
-    if hasattr(mesh, "vertex_normals"):
-        normals = mesh.vertex_normals.astype(np.float32)
-    else:
-        normals = np.zeros_like(positions)
+    for mesh in mesh_list:
+        has_meshes = True
+        # Update bounds
+        combined_bounds_min = np.minimum(combined_bounds_min, mesh.bounds[0])
+        combined_bounds_max = np.maximum(combined_bounds_max, mesh.bounds[1])
 
-    geometry = gfx.Geometry(
-        positions=positions,
-        indices=indices,
-        normals=normals,
-    )
+        # Convert trimesh to pygfx geometry
+        positions = mesh.vertices.astype(np.float32)
+        indices = mesh.faces.astype(np.uint32)
 
-    # Create material for solid mesh
-    base_color = tuple(material_cfg["base_color"])
-    material = gfx.MeshPhongMaterial(
-        color=base_color,
-        shininess=int((1.0 - material_cfg["roughness_factor"]) * 100),
-    )
+        # Compute normals using trimesh (requires scipy for weighted vertex normals)
+        if hasattr(mesh, "vertex_normals"):
+            normals = mesh.vertex_normals.astype(np.float32)
+        else:
+            normals = np.zeros_like(positions)
 
-    # Create solid mesh object
-    mesh_obj = gfx.Mesh(geometry, material)
-    scene.add(mesh_obj)
-
-    # Add wireframe overlay if requested
-    if wireframe_thickness > 0.0:
-        wireframe_color_normalized = tuple(
-            c / 255.0 if i < 3 else c for i, c in enumerate(wireframe_color)
+        geometry = gfx.Geometry(
+            positions=positions,
+            indices=indices,
+            normals=normals,
         )
-        wireframe_material = gfx.MeshBasicMaterial(
-            color=wireframe_color_normalized,
-            wireframe=True,
-            wireframe_thickness=wireframe_thickness,
+
+        # Create material for solid mesh
+        base_color = tuple(material_cfg["base_color"])
+        material = gfx.MeshPhongMaterial(
+            color=base_color,
+            shininess=int((1.0 - material_cfg["roughness_factor"]) * 100),
         )
-        wireframe_obj = gfx.Mesh(geometry, wireframe_material)
-        scene.add(wireframe_obj)
+
+        # Create solid mesh object
+        mesh_obj = gfx.Mesh(geometry, material)
+        scene.add(mesh_obj)
+
+        # Add wireframe overlay if requested
+        if wireframe_thickness > 0.0:
+            wireframe_color_normalized = tuple(
+                c / 255.0 if i < 3 else c for i, c in enumerate(wireframe_color)
+            )
+            wireframe_material = gfx.MeshBasicMaterial(
+                color=wireframe_color_normalized,
+                wireframe=True,
+                wireframe_thickness=wireframe_thickness,
+            )
+            wireframe_obj = gfx.Mesh(geometry, wireframe_material)
+            scene.add(wireframe_obj)
 
     # Calculate camera position and setup
-    bounds = mesh.bounds
-    center = (bounds[0] + bounds[1]) / 2.0
-    extents = bounds[1] - bounds[0]
-    max_extent = float(np.max(extents))
+    if has_meshes:
+        center = (combined_bounds_min + combined_bounds_max) / 2.0
+        extents = combined_bounds_max - combined_bounds_min
+        max_extent = float(np.max(extents))
+    else:
+        # Fallback if no meshes
+        center = np.array([0.0, 0.0, 0.0])
+        max_extent = 1.0
 
     # Use orbital camera if eye and target are provided
     if orbital_eye is not None and orbital_target is not None:
