@@ -4,6 +4,7 @@ import sys
 import termios
 import tty
 from collections import defaultdict
+from contextlib import suppress
 from typing import Any, TypedDict
 
 import numpy as np
@@ -18,6 +19,7 @@ from meshtui.kitty_protocol import (
     get_terminal_size,
 )
 from meshtui.renderer import render_mesh
+from meshtui.screenshot import save_screenshot
 
 # Special key mappings for raw terminal input
 _SPECIAL_KEYS = {
@@ -86,6 +88,7 @@ HELP_ITEMS: list[HelpItem] = [
     {"actions": ["light_decrease", "light_increase"], "description": "Light Intensity Down/Up"},
     {"actions": ["wireframe_increase"], "description": "Grid ON increase wireframe thikness"},
     {"actions": ["wireframe_off"], "description": "Grid OFF (solid)"},
+    {"actions": ["screenshot"], "description": "Save screenshot (PNG)"},
     {"actions": ["help_toggle"], "description": "Toggle this help menu"},
     {"actions": ["quit"], "description": "Quit"},
 ]
@@ -93,7 +96,7 @@ HELP_ITEMS: list[HelpItem] = [
 HELP_SECTIONS: list[HelpSection] = [
     {"title": "Controls:", "items": [0, 1, 2, 3, 4]},
     {"title": "Orbital Camera (vim-style):", "items": [5, 6, 7, 8, 9]},
-    {"title": "", "items": [10, 11, 12, 13, 14]},
+    {"title": "", "items": [10, 11, 12, 13, 14, 15]},
 ]
 
 
@@ -142,6 +145,8 @@ class TUI:
         # Rendering state
         self.last_render_params: dict[str, Any] = {}
         self.last_image_data: bytes | None = None
+        self.last_render_width: int = 0
+        self.last_render_height: int = 0
         self.camera_position = (0.0, 0.0, 0.0)
 
     def _initialize_camera(self):
@@ -375,6 +380,10 @@ class TUI:
             self._initialize_camera()
             return True
 
+        if action == "screenshot":
+            self._save_screenshot()
+            return False  # No need to redraw after screenshot
+
         return False
 
     def render_and_display(self, clear_screen=True, raise_errors=False, force_redraw=False):
@@ -437,6 +446,8 @@ class TUI:
                     ),
                 )
                 self.last_image_data = image_data
+                self.last_render_width = render_width
+                self.last_render_height = render_height
                 self.camera_position = cam_pos
                 self.last_render_params = current_params
             else:
@@ -509,6 +520,14 @@ class TUI:
         footer_text = left_text + " " * available_space + right_text
         print(f"\033[{rows};1H{footer_text}", end="")
         sys.stdout.flush()
+
+    def _save_screenshot(self):
+        """Save the current rendered image as a PNG screenshot."""
+        if self.last_image_data is None:
+            return
+
+        with suppress(Exception):
+            save_screenshot(self.last_image_data, self.last_render_width, self.last_render_height)
 
     def _draw_help_menu(self, cols: int, rows: int):
         bg_ansi = get_terminal_bg_ansi()

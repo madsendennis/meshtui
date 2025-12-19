@@ -113,3 +113,6 @@ zoom_out = "R"
 
 # Reset controls
 reset_orbital = "0"
+
+# Screenshot controls
+screenshot = "s"
