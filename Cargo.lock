@@ -1242,7 +1242,6 @@ dependencies = [
  "crossterm",
  "image",
  "libc",
- "meshtui-core",
  "notify",
  "ratatui",
  "thiserror",

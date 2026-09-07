@@ -55,21 +55,6 @@ default_thickness = 0.0                # Default wireframe thickness (0.0 = off)
 color_dark_bg = [60, 60, 60, 255]      # Medium grey wireframe for dark backgrounds
 color_light_bg = [20, 20, 20, 255]     # Dark grey wireframe for light backgrounds
 
-[performance]
-# Performance optimization settings
-# Note: Already optimized - uses raw RGBA transfer (no PNG encoding overhead)
-# Progressive rendering settings:
-# 1. Interaction: Used while moving/interacting (fastest)
-# 2. Intermediate: Used shortly after interaction stops
-# 3. High: Used for final static image
-render_resolution_interaction = 300    # Resolution for interaction (max dimension)
-render_resolution_intermediate = 600   # Resolution for intermediate step (max dimension)
-render_resolution_high = 1000          # Resolution for final static image (max dimension)
-render_timeout_interaction = 0.05      # Time in seconds to wait before upgrading from interaction to intermediate
-render_timeout_intermediate = 0.1      # Time in seconds to wait before upgrading from intermediate to high
-                                          # Rendered image is upscaled by Kitty protocol to full display size
-enable_shadows = true                  # Enable shadows from directional lights (costs performance)
-
 [ui.sidepanel]
 # Sidepanel settings
 theme = "omarchy"                      # Live Omarchy theme; falls back to nord when unavailable
