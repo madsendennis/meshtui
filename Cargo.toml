@@ -25,6 +25,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 ratatui = "0.29"
 crossterm = "0.28"
 regex = "1"
+dirs = "6"
 criterion = { version = "0.5", features = ["html_reports"] }
 meshtui-core = { path = "crates/meshtui-core" }
 meshtui-render = { path = "crates/meshtui-render" }

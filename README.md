@@ -44,8 +44,23 @@ target/release/meshtui model.ply \
   --screenshot render.png \
   --size 1920x1080
 
-# Merge a user configuration over the embedded defaults
+# Merge an extra configuration over the user config for one run
 target/release/meshtui model.ply --config config.toml
+```
+
+## Configuration
+
+On first run, MeshTUI writes a fully commented copy of every default setting
+to `~/.config/meshtui/config.toml` (honouring `XDG_CONFIG_HOME`) and loads it
+on every subsequent run. Edit that file to change defaults permanently; pass
+`--config <file>` to merge an additional file on top for a single run.
+
+Precedence: embedded defaults < user config < `--config`.
+
+```bash
+meshtui --print-config                    # dump the merged effective config
+meshtui --write-default-config            # (re)write the user defaults file
+meshtui --write-default-config=/tmp/c.toml  # or to an explicit path
 ```
 
 Interactive mode requires a terminal that implements the Kitty graphics
