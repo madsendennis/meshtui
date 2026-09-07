@@ -4,6 +4,10 @@ MeshTUI is a fast terminal 3D mesh viewer written in Rust. It uses a
 multithreaded software rasterizer and the Kitty graphics protocol, so it does
 not require a GPU, desktop session, or display server.
 
+> **Implementation note:** MeshTUI was auto-converted from an original Python
+> implementation to Rust for better performance, a smaller self-contained
+> binary, and easier distribution (no Python runtime or dependencies needed).
+
 ## Features
 
 - Interactive orbit, zoom, axis presets, orthographic/perspective cameras, and animation
