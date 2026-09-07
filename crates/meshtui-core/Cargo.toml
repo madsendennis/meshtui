@@ -1,0 +1,14 @@
+[package]
+name = "meshtui-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+glam.workspace = true
+rayon.workspace = true
+serde.workspace = true
+toml.workspace = true
+memmap2.workspace = true
+thiserror.workspace = true
+draco-oxide = "0.1.0-alpha.11"
+serde_json = "1.0.151"

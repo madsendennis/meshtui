@@ -1,0 +1,22 @@
+# Example user configuration for meshtui
+# Pass this file with: meshtui --config example_user_config.toml <mesh>
+#
+# You only need to specify values you want to override from the defaults.
+# All other values will be inherited from default_config.toml
+
+# Example: Change the theme (omarchy, github_light, nord, dracula, monokai, gruvbox)
+[ui.sidepanel]
+theme = "dracula"
+
+# Example: Change the default mesh surface
+[material]
+base_color = [0.4, 0.6, 1.0, 1.0]
+roughness_factor = 0.4
+
+# Example: Adjust lighting intensity
+[lighting]
+key_light_intensity = 5.0
+
+# Example: Change default view to look from the top
+[view]
+default_axis = "+y"

@@ -1,0 +1,197 @@
+# meshtui rendering configuration
+# This file contains default rendering settings for the 3D mesh viewer
+
+[camera]
+# Camera settings
+type = "orthographic"                  # Camera type: "perspective" or "orthographic"
+fov_degrees = 60.0                     # Field of view in degrees (vertical) for perspective
+distance_padding = 1.0                 # Multiplier for auto-calculated distance (larger = farther)
+initial_theta = 0.0                    # Initial horizontal angle in radians
+initial_phi = 1.57                     # Initial vertical angle in radians (pi/2 = 90 degrees)
+smoothing_factor = 0.8                 # Camera smoothing factor (0.1-1.0, higher is faster)
+
+[orbital_camera]
+# Orbital camera controls (vim-style)
+movement_speed = 0.1                   # Base rotation speed in radians for h/j/k/l
+movement_speed_fast_multiplier = 5.0   # Multiplier for H/J/K/L keys
+zoom_in_factor = 0.9                   # Multiplier for 'z' key (zoom in)
+zoom_out_factor = 1.1                  # Multiplier for 'Z' key (zoom out)
+
+[view]
+# Default view settings
+default_axis = "+y"                    # Default view axis: +x, -x, +y, -y, +z, -z
+
+# Up vectors for cycling with u/U keys (first one is the default)
+up_vectors = [ # First index is default
+    [0.0, 1.0, 0.0],   # Y-up
+    [0.0, 0.0, 1.0],   # Z-up
+]
+
+[material]
+# PBR Material settings
+base_color = [0.85, 0.85, 0.87, 1.0]  # Light grey RGBA
+metallic_factor = 0.2                  # Low metallic for matte look (0.0-1.0)
+roughness_factor = 0.7                 # High roughness reduces reflections (0.0-1.0)
+
+[scene]
+# Scene environment settings
+ambient_light = [0.15, 0.15, 0.15]     # Moderate ambient light RGB
+bg_color_dark = [26, 27, 38, 0]        # Background for dark terminals (RGBA)
+bg_color_light = [255, 255, 255, 0]    # Background for light terminals (RGBA)
+
+[lighting]
+# Raymond 3-point lighting system intensities
+key_light_intensity = 1.5              # Main headlamp from camera
+fill_light_intensity = 1.5             # Fill light (45° left, 15° up)
+fill_light_azimuth = -45.0             # Azimuth angle in degrees
+fill_light_elevation = 15.0            # Elevation angle in degrees
+rim_light_intensity = 0.6              # Rim/back light (135° right, 10° up)
+rim_light_azimuth = 135.0              # Azimuth angle in degrees
+rim_light_elevation = 10.0             # Elevation angle in degrees
+
+[wireframe]
+# Wireframe overlay settings
+default_thickness = 0.0                # Default wireframe thickness (0.0 = off)
+color_dark_bg = [60, 60, 60, 255]      # Medium grey wireframe for dark backgrounds
+color_light_bg = [20, 20, 20, 255]     # Dark grey wireframe for light backgrounds
+
+[performance]
+# Performance optimization settings
+# Note: Already optimized - uses raw RGBA transfer (no PNG encoding overhead)
+# Progressive rendering settings:
+# 1. Interaction: Used while moving/interacting (fastest)
+# 2. Intermediate: Used shortly after interaction stops
+# 3. High: Used for final static image
+render_resolution_interaction = 300    # Resolution for interaction (max dimension)
+render_resolution_intermediate = 600   # Resolution for intermediate step (max dimension)
+render_resolution_high = 1000          # Resolution for final static image (max dimension)
+render_timeout_interaction = 0.05      # Time in seconds to wait before upgrading from interaction to intermediate
+render_timeout_intermediate = 0.1      # Time in seconds to wait before upgrading from intermediate to high
+                                          # Rendered image is upscaled by Kitty protocol to full display size
+enable_shadows = true                  # Enable shadows from directional lights (costs performance)
+
+[ui.sidepanel]
+# Sidepanel settings
+theme = "omarchy"                      # Live Omarchy theme; falls back to nord when unavailable
+show_scene_info = true                 # Show scene info panel by default
+scene_info_toggle_key = "."            # Key to toggle scene info panel
+
+# Color palette for mesh color cycling (RGBA values 0-1)
+# These are the only manually-defined colors outside of theme colors
+color_palette = [
+    [1.0, 1.0, 1.0, 1.0],    # White
+    [1.0, 0.4, 0.4, 1.0],    # Red
+    [0.4, 1.0, 0.4, 1.0],    # Green
+    [0.4, 0.6, 1.0, 1.0],    # Blue
+    [1.0, 0.8, 0.2, 1.0],    # Yellow
+    [0.8, 0.4, 1.0, 1.0],    # Purple
+    [1.0, 0.5, 0.0, 1.0],    # Orange
+    [0.0, 0.8, 0.8, 1.0],    # Cyan
+]
+
+[ui.animation]
+# Animation settings for camera transitions
+transition_duration_ms = 300           # Duration of smooth camera transitions in milliseconds
+animation_fps = 60                     # Frames per second during animation
+render_on_animate = true               # Whether to render during animation (smooth transitions)
+default_interval_ms = 100              # Default animation interval in milliseconds
+
+# Animation direction keys (references orbit keys from keybindings)
+# orbit_left = left, orbit_right = right, orbit_up = up, orbit_down = down
+# These map to the orbit actions for animation direction
+
+[ui.command_palette]
+# Command palette settings
+fuzzy_match_threshold = 0.2            # Minimum score for fuzzy match to be shown
+max_visible_items = 20                 # Maximum number of items to show in list
+
+[terminal]
+# Terminal cell size estimates (used when terminal queries are unavailable)
+estimated_cell_width_px = 10           # Estimated width of one character cell in pixels
+estimated_cell_height_px = 20          # Estimated height of one character cell in pixels
+
+[keybindings]
+# Keybindings for controlling the viewer
+# Keys can be single characters, special keys ("esc", "space", "tab"), or modifier combinations ("ctrl+c")
+# Multiple keys can be assigned to the same action using arrays
+# All keys work the same in all states (normal, sidepanel, etc.)
+# Modals (animation, hex input) capture all input
+
+quit = "q"
+
+# Sidepanel
+toggle_sidepanel = "tab"
+
+# View axis switching (numeric row)
+view_minus_x = "1"
+view_plus_x = "2"
+view_minus_y = "3"
+view_plus_y = "4"
+view_minus_z = "5"
+view_plus_z = "6"
+
+# Wireframe controls
+wireframe_off = "g"
+wireframe_increase = "G"
+
+# Camera type
+camera_orthographic = "w"
+camera_perspective = "W"
+
+# Lighting controls
+light_decrease = "i"
+light_increase = "I"
+
+# Up vector cycling
+up_vector_next = "u"
+up_vector_prev = "U"
+
+# Orbital camera controls (vim-style)
+orbit_left = "h"
+orbit_right = "l"
+orbit_down = "j"
+orbit_up = "k"
+orbit_left_fast = "H"
+orbit_right_fast = "L"
+orbit_down_fast = "J"
+orbit_up_fast = "K"
+
+# Zoom controls
+zoom_in = "z"
+zoom_out = "Z"
+
+# Reset controls
+reset_single_mesh = "r"
+reset_all_meshes = "R"
+reset_orbital = "0"
+
+# Screenshot controls
+screenshot = "p"
+
+# Scene info panel toggle
+toggle_scene_info = "."
+
+# Mesh visibility controls
+mesh_hide = "s"
+mesh_show = "S"
+
+# Mesh color controls
+mesh_color_next = "c"
+mesh_color_prev = "C"
+
+# Mesh reset controls
+mesh_custom_color = "x"
+mesh_toggle_mark = "space"
+mesh_select_all = "ctrl+a"             # Select all meshes matching the current filter
+mesh_select_none = "ctrl+n"            # Clear the mesh selection
+mesh_filter = "/"
+
+# Animation controls
+animation_start = "a"
+animation_stop = "A"
+
+# Sidepanel controls
+sidepanel_move_up = "up"
+sidepanel_move_down = "down"
+sidepanel_expand = "enter"
+sidepanel_collapse = "escape"

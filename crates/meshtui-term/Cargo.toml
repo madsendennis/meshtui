@@ -1,0 +1,15 @@
+[package]
+name = "meshtui-term"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+meshtui-core.workspace = true
+image.workspace = true
+thiserror.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+libc = "0.2"
+base64 = "0.22"
+notify = "8"
+toml.workspace = true
