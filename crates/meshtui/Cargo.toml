@@ -1,0 +1,23 @@
+[package]
+name = "meshtui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+meshtui-core.workspace = true
+meshtui-render.workspace = true
+meshtui-term.workspace = true
+glam.workspace = true
+anyhow.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+image.workspace = true
+toml.workspace = true
+regex.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "load"
+harness = false
