@@ -1,0 +1,87 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-musl
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p meshtui
+
+      - name: Smoke test binary
+        run: |
+          bin=target/${{ matrix.target }}/release/meshtui
+          "$bin" --help
+          "$bin" --print-config > /dev/null
+
+      - name: Package tarball
+        env:
+          TARGET: ${{ matrix.target }}
+          REF: ${{ github.ref_name }}
+        run: |
+          staging="meshtui-${REF}-${TARGET}"
+          mkdir -p "$staging"
+          cp "target/${TARGET}/release/meshtui" "$staging/"
+          cp README.md LICENSE packaging/install.sh "$staging/"
+          cp crates/meshtui-core/default_config.toml "$staging/"
+          chmod +x "$staging/install.sh"
+          tar czf "${staging}.tar.gz" "$staging"
+          echo "archive=${staging}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Checksums
+        run: sha256sum "${{ env.archive }}" >> SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            ${{ env.archive }}
+            SHA256SUMS
+          retention-days: 5
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ls -la
+          # Latest-release friendly aliases: republished on every tag so
+          # /releases/latest/download/<alias> always works.
+          cp "meshtui-${{ github.ref_name }}-x86_64-unknown-linux-musl.tar.gz" \
+             meshtui-x86_64-unknown-linux-musl.tar.gz
+          cp "meshtui-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz" \
+             meshtui-x86_64-unknown-linux-gnu.tar.gz
+          gh release create "${{ github.ref_name }}" \
+            --generate-notes \
+            *.tar.gz SHA256SUMS
