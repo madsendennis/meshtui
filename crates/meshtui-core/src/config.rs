@@ -6,7 +6,7 @@
 //!   defines it (the Python code read the wrong section and ignored it).
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -351,15 +351,29 @@ impl Config {
     /// Load the embedded defaults, optionally merged with a user TOML file
     /// (user values override defaults, section-wise via deep merge).
     pub fn load(user_path: Option<&Path>) -> Result<Self, ConfigError> {
-        let mut base: toml::Value = toml::from_str(DEFAULT_CONFIG)
-            .map_err(|e| ConfigError::Parse("<default>".into(), e))?;
-        if let Some(path) = user_path {
-            let text = std::fs::read_to_string(path)
-                .map_err(|e| ConfigError::Io(path.to_path_buf(), e))?;
-            let user: toml::Value = toml::from_str(&text)
-                .map_err(|e| ConfigError::Parse(path.display().to_string(), e))?;
-            merge_toml(&mut base, user);
-        }
+        let paths: Vec<&Path> = user_path.into_iter().collect();
+        Self::from_merged(merge_layers(&paths)?)
+    }
+
+    /// Load with full layering: embedded defaults, then the XDG user config
+    /// (see [`user_config_path`]) if it exists, then the explicit `--config`
+    /// file. Later layers override earlier ones.
+    pub fn load_effective(cli_path: Option<&Path>) -> Result<Self, ConfigError> {
+        Self::load_with_user_layers(user_config_path().as_deref(), cli_path)
+    }
+
+    /// Like [`Config::load_effective`], but with an explicit user-config path
+    /// instead of the XDG-resolved one (used by tests).
+    pub fn load_with_user_layers(
+        user_path: Option<&Path>,
+        cli_path: Option<&Path>,
+    ) -> Result<Self, ConfigError> {
+        let user = user_path.filter(|p| p.exists());
+        let paths: Vec<&Path> = user.into_iter().chain(cli_path).collect();
+        Self::from_merged(merge_layers(&paths)?)
+    }
+
+    fn from_merged(base: toml::Value) -> Result<Self, ConfigError> {
         let cfg: Config = base
             .try_into()
             .map_err(|e| ConfigError::Parse("<merged>".into(), e))?;
@@ -596,6 +610,8 @@ pub enum ConfigError {
     Io(std::path::PathBuf, std::io::Error),
     #[error("failed to parse {0}: {1}")]
     Parse(String, toml::de::Error),
+    #[error("failed to serialize config: {0}")]
+    Serialize(#[source] toml::ser::Error),
     #[error("duplicate keybinding: key {key:?} maps to both {first:?} and {second:?}")]
     DuplicateKey {
         key: String,
@@ -604,6 +620,59 @@ pub enum ConfigError {
     },
     #[error("invalid configuration: {0}")]
     Invalid(String),
+}
+
+/// Path to the per-user config file:
+/// `$XDG_CONFIG_HOME/meshtui/config.toml`, usually
+/// `~/.config/meshtui/config.toml`. `None` when no config directory can be
+/// determined (e.g. `HOME` unset on a headless server).
+pub fn user_config_path() -> Option<PathBuf> {
+    Some(dirs::config_dir()?.join("meshtui").join("config.toml"))
+}
+
+/// Write the embedded defaults to `path`, creating parent directories.
+pub fn write_default_config(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, DEFAULT_CONFIG)
+}
+
+/// Create the per-user config file with all defaults if it does not exist.
+/// Returns the path when a file was written, `None` when it already exists
+/// or no config directory is available.
+pub fn ensure_user_config() -> std::io::Result<Option<PathBuf>> {
+    let Some(path) = user_config_path() else {
+        return Ok(None);
+    };
+    if path.exists() {
+        return Ok(None);
+    }
+    write_default_config(&path)?;
+    Ok(Some(path))
+}
+
+/// The fully merged configuration (embedded defaults, then the XDG user
+/// config, then `cli_path`) rendered as TOML — what `--print-config` outputs.
+pub fn effective_config_toml(cli_path: Option<&Path>) -> Result<String, ConfigError> {
+    let xdg = user_config_path();
+    let xdg = xdg.as_deref().filter(|p| p.exists());
+    let paths: Vec<&Path> = xdg.into_iter().chain(cli_path).collect();
+    let merged = merge_layers(&paths)?;
+    toml::to_string_pretty(&merged).map_err(ConfigError::Serialize)
+}
+
+fn merge_layers(paths: &[&Path]) -> Result<toml::Value, ConfigError> {
+    let mut base: toml::Value =
+        toml::from_str(DEFAULT_CONFIG).map_err(|e| ConfigError::Parse("<default>".into(), e))?;
+    for path in paths {
+        let text =
+            std::fs::read_to_string(path).map_err(|e| ConfigError::Io(path.to_path_buf(), e))?;
+        let layer: toml::Value =
+            toml::from_str(&text).map_err(|e| ConfigError::Parse(path.display().to_string(), e))?;
+        merge_toml(&mut base, layer);
+    }
+    Ok(base)
 }
 
 fn merge_toml(base: &mut toml::Value, over: toml::Value) {
@@ -657,6 +726,43 @@ mod tests {
         assert_eq!(cfg.key("orbit_left").as_deref(), Some("b"));
         // untouched defaults remain
         assert_eq!(cfg.key("orbit_right").as_deref(), Some("l"));
+    }
+
+    #[test]
+    fn user_layer_overrides_defaults_and_cli_wins() {
+        let dir = std::env::temp_dir();
+        let user = dir.join("meshtui_test_user_layer.toml");
+        let cli = dir.join("meshtui_test_cli_layer.toml");
+        std::fs::write(
+            &user,
+            "[material]\nroughness_factor = 0.4\n[lighting]\nkey_light_intensity = 3.0\n",
+        )
+        .unwrap();
+        std::fs::write(&cli, "[material]\nroughness_factor = 0.9\n").unwrap();
+        let cfg = Config::load_with_user_layers(Some(&user), Some(&cli)).unwrap();
+        std::fs::remove_file(&user).ok();
+        std::fs::remove_file(&cli).ok();
+        // cli file beats the user layer on conflict
+        assert_eq!(cfg.material.roughness_factor, 0.9);
+        // user layer beats the embedded default (1.5)
+        assert_eq!(cfg.lighting.key_light_intensity, 3.0);
+    }
+
+    #[test]
+    fn missing_user_layer_is_skipped() {
+        let absent = Path::new("/nonexistent/meshtui_test/config.toml");
+        let cfg = Config::load_with_user_layers(Some(absent), None).unwrap();
+        assert_eq!(cfg.lighting.key_light_intensity, 1.5);
+    }
+
+    #[test]
+    fn write_default_config_roundtrips() {
+        let dir = std::env::temp_dir().join("meshtui_test_defaults");
+        let path = dir.join("nested/config.toml");
+        write_default_config(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(text, DEFAULT_CONFIG);
     }
 
     #[test]

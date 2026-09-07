@@ -15,7 +15,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use meshtui_core::config::Config;
+use meshtui_core::config::{self, Config};
 use meshtui_core::loaders::load_meshes;
 use meshtui_core::Scene;
 
@@ -29,9 +29,16 @@ fn usage() -> &'static str {
      Supported formats: .ply, .stl, .obj, .drc, .glb\n\
      \n\
      Options:\n\
-     \x20 --config <path>     user TOML config (merged over defaults)\n\
+     \x20 --config <path>     extra TOML config merged over the user config\n\
      \x20 --size <WxH>        screenshot size (default 1600x1200)\n\
-     \x20 --help              this message"
+     \x20 --print-config      print the merged effective config and exit\n\
+     \x20 --write-default-config[=<path>]\n\
+     \x20                     write all defaults to the user config file\n\
+     \x20                     (default: ~/.config/meshtui/config.toml)\n\
+     \x20 --help              this message\n\
+     \n\
+     The user config is created with all defaults on first run and loaded\n\
+     on every run. Precedence: embedded defaults < user config < --config."
 }
 
 struct Args {
@@ -39,6 +46,8 @@ struct Args {
     config: Option<PathBuf>,
     screenshot: Option<PathBuf>,
     size: (u32, u32),
+    print_config: bool,
+    write_default_config: Option<Option<PathBuf>>,
 }
 
 fn parse_args(argv: &[String]) -> Result<Args, String> {
@@ -47,6 +56,8 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         config: None,
         screenshot: None,
         size: (1600, 1200),
+        print_config: false,
+        write_default_config: None,
     };
     let mut it = argv.iter();
     while let Some(a) = it.next() {
@@ -54,6 +65,15 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             "--help" | "-h" => return Err(usage().to_string()),
             "--config" => {
                 args.config = Some(PathBuf::from(it.next().ok_or("--config needs a path")?))
+            }
+            "--print-config" => args.print_config = true,
+            "--write-default-config" => args.write_default_config = Some(None),
+            other if other.starts_with("--write-default-config=") => {
+                let path = &other["--write-default-config=".len()..];
+                if path.is_empty() {
+                    return Err("--write-default-config=<path> needs a non-empty path".into());
+                }
+                args.write_default_config = Some(Some(PathBuf::from(path)));
             }
             "--screenshot" => {
                 args.screenshot = Some(PathBuf::from(it.next().ok_or("--screenshot needs a path")?))
@@ -74,7 +94,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             other => args.meshes.push(PathBuf::from(other)),
         }
     }
-    if args.meshes.is_empty() {
+    if args.meshes.is_empty() && !args.print_config && args.write_default_config.is_none() {
         return Err(usage().to_string());
     }
     Ok(args)
@@ -84,7 +104,33 @@ fn run() -> Result<(), String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let args = parse_args(&argv)?;
 
-    let config = Config::load(args.config.as_deref()).map_err(|e| e.to_string())?;
+    // Config-only commands run without meshes.
+    if let Some(target) = &args.write_default_config {
+        let path = match target {
+            Some(p) => p.clone(),
+            None => config::user_config_path()
+                .ok_or("could not determine user config directory (is HOME set?)")?,
+        };
+        config::write_default_config(&path).map_err(|e| e.to_string())?;
+        println!("wrote default config to {}", path.display());
+        return Ok(());
+    }
+    if args.print_config {
+        let text =
+            config::effective_config_toml(args.config.as_deref()).map_err(|e| e.to_string())?;
+        println!("{text}");
+        return Ok(());
+    }
+
+    // First run: place a fully commented copy of the defaults at the XDG
+    // config path. Best-effort — a read-only home must not block startup.
+    match config::ensure_user_config() {
+        Ok(Some(path)) => eprintln!("meshtui: wrote default config to {}", path.display()),
+        Ok(None) => {}
+        Err(e) => eprintln!("meshtui: warning: could not write user config: {e}"),
+    }
+
+    let config = Config::load_effective(args.config.as_deref()).map_err(|e| e.to_string())?;
 
     let mut scene = Scene::new();
     let mut paths: Vec<PathBuf> = Vec::new();
