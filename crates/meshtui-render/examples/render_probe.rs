@@ -9,7 +9,10 @@ use meshtui_render::RenderBackend;
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let path = args.next().unwrap_or_else(|| "tmp/16.ply".to_string());
+    let Some(path) = args.next() else {
+        eprintln!("usage: render_probe <mesh-or-dir> [theta_deg] [phi_deg] [out.ppm]");
+        std::process::exit(2);
+    };
     let theta_deg: f32 = args.next().map(|s| s.parse().unwrap()).unwrap_or(0.0);
     let phi_deg: f32 = args.next().map(|s| s.parse().unwrap()).unwrap_or(90.0);
     let out = args
