@@ -52,14 +52,14 @@ jobs:
           echo "archive=${staging}.tar.gz" >> "$GITHUB_ENV"
 
       - name: Checksums
-        run: sha256sum "${{ env.archive }}" >> SHA256SUMS
+        run: sha256sum "${{ env.archive }}" > "SHA256SUMS.${{ matrix.target }}"
 
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.target }}
           path: |
             ${{ env.archive }}
-            SHA256SUMS
+            SHA256SUMS.${{ matrix.target }}
           retention-days: 5
 
   release:
@@ -83,6 +83,8 @@ jobs:
              meshtui-x86_64-unknown-linux-musl.tar.gz
           cp "meshtui-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz" \
              meshtui-x86_64-unknown-linux-gnu.tar.gz
+          cat SHA256SUMS.* > SHA256SUMS
+          sha256sum -c SHA256SUMS
           gh release create "${{ github.ref_name }}" \
             --generate-notes \
             *.tar.gz SHA256SUMS
