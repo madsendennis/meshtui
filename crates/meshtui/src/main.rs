@@ -35,6 +35,7 @@ fn usage() -> &'static str {
      \x20 --write-default-config[=<path>]\n\
      \x20                     write all defaults to the user config file\n\
      \x20                     (default: ~/.config/meshtui/config.toml)\n\
+     \x20 --version           print the version and exit\n\
      \x20 --help              this message\n\
      \n\
      The user config is created with all defaults on first run and loaded\n\
@@ -187,6 +188,13 @@ fn main() -> ExitCode {
         .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
     {
         println!("{}", usage());
+        return ExitCode::SUCCESS;
+    }
+    if std::env::args()
+        .skip(1)
+        .any(|arg| matches!(arg.as_str(), "--version" | "-V"))
+    {
+        println!("meshtui {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
     }
     match run() {
