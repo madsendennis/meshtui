@@ -98,17 +98,18 @@ impl App {
             config.camera.fov_degrees,
             config.camera.distance_padding,
         );
-        camera.theta = config.camera.initial_theta;
-        camera.phi = config.camera.initial_phi;
-        camera.up = Vec3::from(
-            config
-                .view
-                .up_vectors
-                .first()
-                .copied()
-                .unwrap_or([0.0, 1.0, 0.0]),
-        )
-        .normalize_or(Vec3::Y);
+        camera.set_spherical(
+            config.camera.initial_theta,
+            config.camera.initial_phi,
+            Vec3::from(
+                config
+                    .view
+                    .up_vectors
+                    .first()
+                    .copied()
+                    .unwrap_or([0.0, 1.0, 0.0]),
+            ),
+        );
         if let Some(axis) = ViewAxis::parse(&config.view.default_axis) {
             camera.set_view_axis(axis);
         }
@@ -209,13 +210,13 @@ impl App {
         let l = &mut self.rasterizer.options.lighting;
         l.fill_dir = camera_light_offset(
             fwd,
-            self.camera.up,
+            self.camera.up(),
             lc.fill_light_azimuth,
             lc.fill_light_elevation,
         );
         l.rim_dir = camera_light_offset(
             fwd,
-            self.camera.up,
+            self.camera.up(),
             lc.rim_light_azimuth,
             lc.rim_light_elevation,
         );
@@ -651,10 +652,10 @@ impl App {
         if let Some((min, max)) = self.scene.visible_bounds() {
             let kind = self.camera.kind;
             let fov = self.camera.fov_degrees;
-            let up = self.camera.up;
+            let up = self.camera.up();
             self.camera =
                 Camera::frame_bounds(min, max, kind, fov, self.config.camera.distance_padding);
-            self.camera.up = up;
+            self.camera.set_up(up);
         }
     }
 
@@ -943,9 +944,9 @@ impl App {
                     camera.z,
                     kind,
                     self.camera.fov_degrees,
-                    self.camera.up.x,
-                    self.camera.up.y,
-                    self.camera.up.z,
+                    self.camera.up().x,
+                    self.camera.up().y,
+                    self.camera.up().z,
                 ))
                 .block(
                     Block::default()
@@ -1485,8 +1486,7 @@ mod tests {
             .push(triangle_at("far", Vec3::new(100.0, 0.0, 0.0), 1.0));
         let mut app = App::new(scene, Config::load(None).unwrap());
         app.camera.orbit(0.3, -0.1);
-        let theta = app.camera.theta;
-        let phi = app.camera.phi;
+        let orientation = app.camera.orientation;
         let combined_distance = app.camera.distance;
         let combined_target = app.camera.target;
 
@@ -1510,8 +1510,7 @@ mod tests {
             app.camera.distance,
             combined_distance
         );
-        assert_eq!(app.camera.theta, theta);
-        assert_eq!(app.camera.phi, phi);
+        assert_eq!(app.camera.orientation, orientation);
     }
 
     #[test]
@@ -1693,10 +1692,10 @@ mod tests {
     #[test]
     fn animation_advances_camera() {
         let mut app = app_with_meshes(&["mesh"]);
-        let theta = app.camera.theta;
+        let orientation = app.camera.orientation;
         app.start_animation("orbit_left", 1);
         app.advance_animation(Instant::now() + Duration::from_millis(2));
-        assert!(app.camera.theta < theta);
+        assert_ne!(app.camera.orientation, orientation);
         assert!(app.render_dirty);
     }
 
@@ -1719,11 +1718,15 @@ mod tests {
         app.render_dirty = false;
         app.start_animation("orbit_right", 50);
         let first_step = app.animation.as_ref().unwrap().next_step;
-        let theta = app.camera.theta;
+        let mut expected = app.camera.clone();
+        expected.orbit(3.0 * app.config.orbital_camera.movement_speed, 0.0);
         app.advance_animation(first_step + Duration::from_millis(125));
-        let expected = (theta + 3.0 * app.config.orbital_camera.movement_speed)
-            .rem_euclid(std::f32::consts::TAU);
-        assert!((app.camera.theta - expected).abs() < 1e-5);
+        assert!(
+            (app.camera.position() - expected.position()).length() < 1e-4,
+            "pos={:?} expected={:?}",
+            app.camera.position(),
+            expected.position()
+        );
         assert!(app.render_dirty);
 
         app.render_dirty = false;
