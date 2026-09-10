@@ -13,13 +13,6 @@ __pycache__/
 .mypy_cache/
 .ty_cache/
 
-# Mesh samples
-*.stl
-*.ply
-*.obj
-*.glb
-*.drc
-
 # Local notes
 release_plan.md
 future_dev.md
