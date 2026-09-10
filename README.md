@@ -19,7 +19,29 @@ not require a GPU, desktop session, or display server.
 - Fast shared-memory/local-file image transfer and an SSH-safe direct transfer path
 - PNG screenshots in interactive or fully headless environments
 
-## Build
+## Install
+
+Prebuilt Linux binaries are attached to every
+[release](https://github.com/madsendennis/meshtui/releases) — no Rust
+toolchain needed.
+
+```bash
+# Pin the release version (see https://github.com/madsendennis/meshtui/releases
+# for the latest tag). musl = static build, works everywhere; gnu = glibc build.
+V=v0.1.1
+curl -LO https://github.com/madsendennis/meshtui/releases/download/$V/meshtui-$V-x86_64-unknown-linux-musl.tar.gz
+tar xzf meshtui-$V-x86_64-unknown-linux-musl.tar.gz
+cd meshtui-*/ && ./install.sh
+```
+
+The installer copies `meshtui` to `~/.local/bin` (set `PREFIX=/usr/local`
+with sudo for a system-wide install). Or just copy the `meshtui` binary
+anywhere in your `PATH` — it is fully self-contained.
+
+To verify a download, fetch `SHA256SUMS` from the same release
+(`.../download/$V/SHA256SUMS`) and run `sha256sum -c SHA256SUMS --ignore-missing`.
+
+## Build from source
 
 A stable Rust toolchain is required.
 
@@ -33,19 +55,19 @@ The binary is written to `target/release/meshtui`.
 
 ```bash
 # Open one or more meshes
-target/release/meshtui model.ply
-target/release/meshtui model.stl second.obj
+meshtui model.ply
+meshtui model.stl second.obj
 
 # Load every supported mesh in a directory
-target/release/meshtui ./models
+meshtui ./models
 
 # Render without a TTY, GPU, or display server
-target/release/meshtui model.ply \
+meshtui model.ply \
   --screenshot render.png \
   --size 1920x1080
 
 # Merge an extra configuration over the user config for one run
-target/release/meshtui model.ply --config config.toml
+meshtui model.ply --config config.toml
 ```
 
 ## Configuration
@@ -120,7 +142,7 @@ For an interactive SSH session, run MeshTUI from a local terminal with Kitty
 graphics support and allocate a remote TTY:
 
 ```bash
-ssh -t server target/release/meshtui /data/model.ply
+ssh -t server meshtui /data/model.ply
 ```
 
 MeshTUI detects SSH and embeds each compressed frame directly in the terminal
