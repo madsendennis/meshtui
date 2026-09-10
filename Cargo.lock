@@ -1194,7 +1194,7 @@ dependencies = [
 
 [[package]]
 name = "meshtui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "criterion",
@@ -1211,7 +1211,7 @@ dependencies = [
 
 [[package]]
 name = "meshtui-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dirs",
  "draco-oxide",
@@ -1226,7 +1226,7 @@ dependencies = [
 
 [[package]]
 name = "meshtui-render"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "criterion",
  "glam",
@@ -1236,7 +1236,7 @@ dependencies = [
 
 [[package]]
 name = "meshtui-term"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "crossterm",
