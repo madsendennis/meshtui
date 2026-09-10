@@ -55,8 +55,7 @@ fn main() {
         60.0,
         1.0,
     );
-    camera.theta = theta_deg.to_radians();
-    camera.phi = phi_deg.to_radians();
+    camera.set_spherical(theta_deg.to_radians(), phi_deg.to_radians(), glam::Vec3::Y);
 
     let mut rast = SoftwareRasterizer {
         options: Options {
@@ -77,9 +76,9 @@ fn main() {
     // Same call the app makes in update_light_dirs() (config defaults).
     let fwd = (camera.position() - camera.target).normalize();
     rast.options.lighting.fill_dir =
-        meshtui_render::software::camera_light_offset(fwd, camera.up, -45.0, 15.0);
+        meshtui_render::software::camera_light_offset(fwd, camera.up(), -45.0, 15.0);
     rast.options.lighting.rim_dir =
-        meshtui_render::software::camera_light_offset(fwd, camera.up, 135.0, 10.0);
+        meshtui_render::software::camera_light_offset(fwd, camera.up(), 135.0, 10.0);
 
     let frame = rast
         .render(&scene, &camera, 1200, 900)

@@ -1,4 +1,4 @@
-use glam::{Mat4, Vec3};
+use glam::{Mat3, Mat4, Quat, Vec3};
 
 /// Preset view directions, matching the Python keybindings 1..6.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,17 +43,18 @@ pub enum CameraKind {
     Orthographic,
 }
 
-/// Orbital camera. State is target + spherical angles + distance; only this
-/// changes per interaction (scene geometry is static).
+/// Orbital trackball camera. Orientation is a quaternion, so orbiting is free
+/// tumbling with no pole clamping or gimbal lock. State is target +
+/// orientation + distance; only this changes per interaction (scene geometry
+/// is static).
 #[derive(Debug, Clone)]
 pub struct Camera {
     pub target: Vec3,
-    /// Horizontal angle (radians).
-    pub theta: f32,
-    /// Vertical angle from +up axis (radians), clamped away from the poles.
-    pub phi: f32,
+    /// Camera orientation: local +Z points from the target toward the camera,
+    /// local +Y is screen up. `orbit` rotates this directly, so there are no
+    /// angle clamps anywhere.
+    pub orientation: Quat,
     pub distance: f32,
-    pub up: Vec3,
     pub kind: CameraKind,
     /// Vertical FOV in degrees (perspective only).
     pub fov_degrees: f32,
@@ -79,10 +80,9 @@ impl Camera {
         let (center, radius, distance) = fit_bounds(bounds_min, bounds_max, fov_degrees, padding);
         Self {
             target: center,
-            theta: 0.0,
-            phi: std::f32::consts::FRAC_PI_2,
+            // Default pose: camera on -Z of the target, looking along +Z, up +Y.
+            orientation: look_rotation(Vec3::NEG_Z, Vec3::Y),
             distance,
-            up: Vec3::Y,
             kind,
             fov_degrees,
             scene_radius: radius,
@@ -103,20 +103,31 @@ impl Camera {
         self.ortho_scale = 1.0;
     }
 
+    /// Unit vector from the target toward the camera.
+    pub fn offset_dir(&self) -> Vec3 {
+        self.orientation * Vec3::Z
+    }
+
+    /// Camera up axis in world space.
+    pub fn up(&self) -> Vec3 {
+        self.orientation * Vec3::Y
+    }
+
+    /// Camera right axis in world space.
+    pub fn right(&self) -> Vec3 {
+        self.orientation * Vec3::X
+    }
+
     pub fn position(&self) -> Vec3 {
-        // Spherical coordinates around the target, measured against `up`.
-        // Basis: build a frame from up.
-        let (right, fwd) = orthonormal_basis(self.up);
-        let dir = right * (self.phi.sin() * self.theta.cos())
-            + fwd * (self.phi.sin() * self.theta.sin())
-            + self.up * self.phi.cos();
-        self.target + dir * self.distance
+        self.target + self.offset_dir() * self.distance
     }
 
     pub fn view_matrix(&self) -> Mat4 {
         // Consistent eye/target order everywhere (fixes the fill-light
         // look-at order inconsistency from the Python version).
-        Mat4::look_at_rh(self.position(), self.target, self.up)
+        // `up` is always perpendicular to the view direction (same rotation),
+        // so look-at never degenerates.
+        Mat4::look_at_rh(self.position(), self.target, self.up())
     }
 
     pub fn proj_matrix(&self, width: u32, height: u32) -> Mat4 {
@@ -145,9 +156,13 @@ impl Camera {
         self.distance + self.scene_radius * 4.0
     }
 
-    pub fn orbit(&mut self, delta_theta: f32, delta_phi: f32) {
-        self.theta = (self.theta + delta_theta).rem_euclid(std::f32::consts::TAU);
-        self.phi = (self.phi + delta_phi).clamp(MIN_PHI, std::f32::consts::PI - MIN_PHI);
+    /// Free trackball orbit: yaw around the camera's current up axis, pitch
+    /// around its current right axis. No clamping — rotating past the poles
+    /// just keeps tumbling.
+    pub fn orbit(&mut self, delta_yaw: f32, delta_pitch: f32) {
+        let yaw = Quat::from_axis_angle(self.up(), -delta_yaw);
+        let pitch = Quat::from_axis_angle(self.right(), delta_pitch);
+        self.orientation = (yaw * pitch * self.orientation).normalize();
     }
 
     pub fn zoom(&mut self, factor: f32) {
@@ -164,28 +179,41 @@ impl Camera {
 
     /// Snap to a preset view axis: camera looks along -axis at the target.
     pub fn set_view_axis(&mut self, axis: ViewAxis) {
-        let dir = axis.direction();
+        let dir = axis.direction().normalize();
         // Pick an up vector that is not parallel to the view direction.
-        self.up = if dir.dot(self.up).abs() > 0.99 {
+        let up = if dir.dot(self.up()).abs() > 0.99 {
             if dir.dot(Vec3::Y).abs() > 0.99 {
                 Vec3::Z
             } else {
                 Vec3::Y
             }
         } else {
-            self.up
+            self.up()
         };
-        let (right, fwd) = orthonormal_basis(self.up);
-        // Invert position(): dir = right*sin(phi)cos(theta) + fwd*sin(phi)sin(theta) + up*cos(phi)
-        let d = dir.normalize();
-        self.phi = d
-            .dot(self.up)
-            .clamp(-1.0, 1.0)
-            .acos()
-            .clamp(MIN_PHI, std::f32::consts::PI - MIN_PHI);
-        let r = d.dot(right);
-        let f = d.dot(fwd);
-        self.theta = f.atan2(r);
+        self.orientation = look_rotation(dir, up);
+    }
+
+    /// Set the orbit from spherical angles around `up` (compatibility for the
+    /// initial_theta/initial_phi config keys). Same pose as the old spherical
+    /// camera: phi is measured from +up, theta from the basis right vector.
+    pub fn set_spherical(&mut self, theta: f32, phi: f32, up: Vec3) {
+        let up = up.normalize_or(Vec3::Y);
+        let phi = phi.clamp(MIN_PHI, std::f32::consts::PI - MIN_PHI);
+        let (right, fwd) = orthonormal_basis(up);
+        let dir =
+            right * (phi.sin() * theta.cos()) + fwd * (phi.sin() * theta.sin()) + up * phi.cos();
+        self.orientation = look_rotation(dir, up);
+    }
+
+    /// Roll the camera so its up axis matches `new_up`, keeping the view
+    /// direction and position. No-op when looking along `new_up` (degenerate).
+    pub fn set_up(&mut self, new_up: Vec3) {
+        let new_up = new_up.normalize_or(Vec3::Y);
+        let view_dir = -self.offset_dir();
+        if view_dir.dot(new_up).abs() > 0.999 {
+            return;
+        }
+        self.orientation = look_rotation(self.offset_dir(), new_up);
     }
 
     pub fn cycle_up(&mut self, up_vectors: &[[f32; 3]], forward: bool) {
@@ -196,7 +224,7 @@ impl Camera {
             .iter()
             .position(|v| {
                 let v = Vec3::from(*v).normalize_or(Vec3::Y);
-                v.dot(self.up) > 0.999
+                v.dot(self.up()) > 0.999
             })
             .unwrap_or(0);
         let n = up_vectors.len();
@@ -205,22 +233,7 @@ impl Camera {
         } else {
             (idx + n - 1) % n
         };
-        let new_up = Vec3::from(up_vectors[next]).normalize_or(Vec3::Y);
-        // Preserve the view direction as much as possible.
-        let view_dir = (self.target - self.position()).normalize_or(Vec3::NEG_Z);
-        if view_dir.dot(new_up).abs() > 0.999 {
-            return; // would be degenerate
-        }
-        self.up = new_up;
-        // Re-derive theta/phi against the new up.
-        let cam_dir = -view_dir;
-        let (right, fwd) = orthonormal_basis(self.up);
-        self.phi = cam_dir
-            .dot(self.up)
-            .clamp(-1.0, 1.0)
-            .acos()
-            .clamp(MIN_PHI, std::f32::consts::PI - MIN_PHI);
-        self.theta = cam_dir.dot(fwd).atan2(cam_dir.dot(right));
+        self.set_up(Vec3::from(up_vectors[next]));
     }
 }
 
@@ -246,6 +259,23 @@ fn orthonormal_basis(up: Vec3) -> (Vec3, Vec3) {
     (right, fwd)
 }
 
+/// Orientation quaternion for a camera whose target→camera direction is
+/// `back`, rolled so screen up matches `up` (projected onto the view plane).
+fn look_rotation(back: Vec3, up: Vec3) -> Quat {
+    let z = back.normalize_or(Vec3::Z);
+    let f = -z;
+    let s = f.cross(up);
+    let s = if s.length_squared() < 1e-12 {
+        // `up` parallel to the view direction: pick any perpendicular.
+        f.cross(if f.y.abs() > 0.99 { Vec3::X } else { Vec3::Y })
+    } else {
+        s
+    };
+    let s = s.normalize_or(Vec3::X);
+    let u = s.cross(f);
+    Quat::from_mat3(&Mat3::from_cols(s, u, z)).normalize()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,14 +298,42 @@ mod tests {
     }
 
     #[test]
-    fn orbit_clamps_phi() {
+    fn orbit_tumbles_through_poles_without_locking() {
         let mut c = cam();
-        c.orbit(std::f32::consts::TAU * 100.0 + 0.5, 0.0);
-        assert!((0.0..std::f32::consts::TAU).contains(&c.theta));
-        c.orbit(0.0, 100.0);
-        assert!(c.phi <= std::f32::consts::PI - MIN_PHI);
-        c.orbit(0.0, -1000.0);
-        assert!(c.phi >= MIN_PHI);
+        let start = c.position();
+        // A full pitch turn in small steps passes through both poles; the old
+        // spherical camera clamped phi and never got there.
+        for _ in 0..360 {
+            c.orbit(0.0, std::f32::consts::PI / 180.0);
+        }
+        let end = c.position();
+        assert!((start - end).length() < 1e-3, "start={start:?} end={end:?}");
+        assert!((c.orientation.length() - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn orbit_past_pole_flips_camera_to_other_side() {
+        let mut c = cam();
+        let z0 = c.position().z;
+        c.orbit(0.0, std::f32::consts::FRAC_PI_2); // to the pole
+        c.orbit(0.0, std::f32::consts::FRAC_PI_2); // past it
+        assert!(
+            c.position().z * z0 < 0.0,
+            "camera should end on the far side, z0={z0} z={}",
+            c.position().z
+        );
+        // Screen up is now upside down in world space (continuous tumble).
+        assert!(c.up().y < -0.999, "up={:?}", c.up());
+    }
+
+    #[test]
+    fn orbit_yaw_full_circle_returns_to_start() {
+        let mut c = cam();
+        let start = c.position();
+        for _ in 0..72 {
+            c.orbit(std::f32::consts::TAU / 72.0, 0.0);
+        }
+        assert!((start - c.position()).length() < 1e-3);
     }
 
     #[test]
@@ -288,10 +346,30 @@ mod tests {
 
     #[test]
     fn view_axis_parallel_up_is_avoided() {
-        let mut c = cam();
-        c.up = Vec3::Y;
+        let mut c = cam(); // default up is +Y
         c.set_view_axis(ViewAxis::PosY);
-        assert!(c.up.dot(Vec3::Y).abs() < 0.99);
+        let dir = (c.position() - c.target).normalize();
+        assert!(dir.dot(Vec3::Y) > 0.999, "dir={dir}");
+        assert!(c.up().dot(Vec3::Y).abs() < 0.99, "up={:?}", c.up());
+    }
+
+    #[test]
+    fn spherical_pose_matches_default_frame() {
+        let mut c = cam();
+        let default_pos = c.position();
+        let default_up = c.up();
+        c.set_spherical(0.0, std::f32::consts::FRAC_PI_2, Vec3::Y);
+        assert!((c.position() - default_pos).length() < 1e-5);
+        assert!((c.up() - default_up).length() < 1e-5);
+    }
+
+    #[test]
+    fn set_up_rolls_camera_but_keeps_position() {
+        let mut c = cam();
+        let pos = c.position();
+        c.set_up(Vec3::X);
+        assert!((c.position() - pos).length() < 1e-5);
+        assert!(c.up().dot(Vec3::X) > 0.999, "up={:?}", c.up());
     }
 
     #[test]
@@ -329,17 +407,13 @@ mod tests {
             1.0,
         );
         c.orbit(0.4, -0.2);
-        let theta = c.theta;
-        let phi = c.phi;
-        let up = c.up;
+        let orientation = c.orientation;
         let old_distance = c.distance;
 
         c.reframe_bounds(Vec3::ZERO, Vec3::splat(1.0), 1.0);
 
         assert!((c.target - Vec3::splat(0.5)).length() < 1e-5);
-        assert_eq!(c.theta, theta);
-        assert_eq!(c.phi, phi);
-        assert_eq!(c.up, up);
+        assert_eq!(c.orientation, orientation);
         assert_eq!(c.ortho_scale, 1.0);
         assert!(
             c.distance < old_distance * 0.5,
