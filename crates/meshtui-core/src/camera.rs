@@ -67,9 +67,81 @@ pub struct Camera {
 
 const MIN_PHI: f32 = 1e-3;
 
+/// The 8 corners of an axis-aligned bounding box.
+fn bbox_corners(min: Vec3, max: Vec3) -> [Vec3; 8] {
+    let mut c = [Vec3::ZERO; 8];
+    for (i, corner) in c.iter_mut().enumerate() {
+        *corner = Vec3::new(
+            if i & 1 == 0 { min.x } else { max.x },
+            if i & 2 == 0 { min.y } else { max.y },
+            if i & 4 == 0 { min.z } else { max.z },
+        );
+    }
+    c
+}
+
+/// Project the bounding-box corners onto the view plane (camera right/up axes)
+/// and the view direction, returning (half-width, half-height, half-depth)
+/// measured from the box center. Used by the ortho fit.
+fn projected_half_extents(
+    min: Vec3,
+    max: Vec3,
+    right: Vec3,
+    up: Vec3,
+    toward_camera: Vec3,
+) -> (f32, f32, f32) {
+    let center = (min + max) * 0.5;
+    let mut half_w = 0.0f32;
+    let mut half_h = 0.0f32;
+    let mut half_d = 0.0f32;
+    for corner in bbox_corners(min, max) {
+        let rel = corner - center;
+        half_w = half_w.max(rel.dot(right).abs());
+        half_h = half_h.max(rel.dot(up).abs());
+        half_d = half_d.max(rel.dot(toward_camera).abs());
+    }
+    (half_w.max(1e-6), half_h.max(1e-6), half_d.max(1e-6))
+}
+
+/// Distance from the box center at which a perspective camera fits the whole
+/// bounding box. Each corner is perspective-projected; its depth toward the
+/// camera controls how far back the camera must sit for that corner to land
+/// inside the frustum. Exact: no bounding-sphere waste, no near clipping.
+fn perspective_fit_distance(
+    min: Vec3,
+    max: Vec3,
+    forward: Vec3,
+    right: Vec3,
+    up: Vec3,
+    fov_degrees: f32,
+    aspect: f32,
+) -> f32 {
+    let center = (min + max) * 0.5;
+    let fov = fov_degrees.to_radians();
+    let half_v = (fov * 0.5).tan();
+    let half_h = half_v * aspect.max(1e-3);
+    let mut needed = 0.0f32;
+    for corner in bbox_corners(min, max) {
+        let rel = corner - center;
+        // depth > 0 means the corner is toward the camera from the center.
+        let depth = rel.dot(forward);
+        let x = rel.dot(right).abs();
+        let y = rel.dot(up).abs();
+        // At camera distance D from the center, this corner is (D - depth)
+        // from the camera and fits when x/(D-depth) <= half_h (and same in y).
+        if x > 1e-6 {
+            needed = needed.max(x / half_h + depth);
+        }
+        if y > 1e-6 {
+            needed = needed.max(y / half_v + depth);
+        }
+    }
+    needed.max(1e-3)
+}
+
 impl Camera {
-    /// Frame a scene given its bounds. Distance is padded so the whole
-    /// bounding sphere fits (replicates `calculate_camera_parameters`).
+    /// Frame a scene given its bounds. The fit spans the mesh's projected
+    /// extents (not the full 3D bounding sphere) so meshes fill the viewport.
     pub fn frame_bounds(
         bounds_min: Vec3,
         bounds_max: Vec3,
@@ -77,7 +149,47 @@ impl Camera {
         fov_degrees: f32,
         padding: f32,
     ) -> Self {
-        let (center, radius, distance) = fit_bounds(bounds_min, bounds_max, fov_degrees, padding);
+        Self::frame_bounds_aspect(bounds_min, bounds_max, kind, fov_degrees, padding, 1.0)
+    }
+
+    /// `frame_bounds` with the viewport aspect (width/height) so the fit uses
+    /// the tighter of the horizontal/vertical constraints. Wide viewports on
+    /// wide meshes no longer leave half the screen empty.
+    pub fn frame_bounds_aspect(
+        bounds_min: Vec3,
+        bounds_max: Vec3,
+        kind: CameraKind,
+        fov_degrees: f32,
+        padding: f32,
+        aspect: f32,
+    ) -> Self {
+        let center = (bounds_min + bounds_max) * 0.5;
+        let radius = ((bounds_max - bounds_min).length() * 0.5).max(1e-6);
+        // Default pose looks along +Z with up +Y. Camera offset is -Z.
+        let distance = match kind {
+            // Ortho: apparent size is depth-independent, so the projected
+            // extents on the view plane are the exact thing to fit.
+            CameraKind::Orthographic => {
+                let (half_w, half_h, half_d) =
+                    projected_half_extents(bounds_min, bounds_max, Vec3::X, Vec3::Y, Vec3::NEG_Z);
+                let half_v = (fov_degrees.to_radians() * 0.5).tan();
+                let dist_v = half_h / half_v;
+                let dist_h = half_w / (half_v * aspect.max(1e-3));
+                dist_v.max(dist_h).max(half_d)
+            }
+            // Perspective: project each corner with its own depth so the fit
+            // is exact (no sphere waste, no near clipping). Camera offset is
+            // -Z of the target, so center→camera forward is -Z.
+            CameraKind::Perspective => perspective_fit_distance(
+                bounds_min,
+                bounds_max,
+                Vec3::NEG_Z,
+                Vec3::X,
+                Vec3::Y,
+                fov_degrees,
+                aspect,
+            ),
+        } * padding;
         Self {
             target: center,
             // Default pose: camera on -Z of the target, looking along +Z, up +Y.
@@ -95,11 +207,47 @@ impl Camera {
     /// Used when mesh visibility changes so a remaining mesh is framed instead
     /// of staying at the original scene zoom.
     pub fn reframe_bounds(&mut self, bounds_min: Vec3, bounds_max: Vec3, padding: f32) {
-        let (center, radius, distance) =
-            fit_bounds(bounds_min, bounds_max, self.fov_degrees, padding);
+        self.reframe_bounds_aspect(bounds_min, bounds_max, padding, 1.0);
+    }
+
+    /// `reframe_bounds` with the viewport aspect (see `frame_bounds_aspect`).
+    /// Projects the bounds onto the current view plane so the fit matches what
+    /// the camera is actually looking at.
+    pub fn reframe_bounds_aspect(
+        &mut self,
+        bounds_min: Vec3,
+        bounds_max: Vec3,
+        padding: f32,
+        aspect: f32,
+    ) {
+        let center = (bounds_min + bounds_max) * 0.5;
+        let radius = ((bounds_max - bounds_min).length() * 0.5).max(1e-6);
+        self.distance = match self.kind {
+            CameraKind::Orthographic => {
+                let (half_w, half_h, half_d) = projected_half_extents(
+                    bounds_min,
+                    bounds_max,
+                    self.right(),
+                    self.up(),
+                    self.offset_dir(),
+                );
+                let half_v = (self.fov_degrees.to_radians() * 0.5).tan();
+                let dist_v = half_h / half_v;
+                let dist_h = half_w / (half_v * aspect.max(1e-3));
+                dist_v.max(dist_h).max(half_d)
+            }
+            CameraKind::Perspective => perspective_fit_distance(
+                bounds_min,
+                bounds_max,
+                self.offset_dir(),
+                self.right(),
+                self.up(),
+                self.fov_degrees,
+                aspect,
+            ),
+        } * padding;
         self.target = center;
         self.scene_radius = radius;
-        self.distance = distance;
         self.ortho_scale = 1.0;
     }
 
@@ -237,19 +385,6 @@ impl Camera {
     }
 }
 
-fn fit_bounds(
-    bounds_min: Vec3,
-    bounds_max: Vec3,
-    fov_degrees: f32,
-    padding: f32,
-) -> (Vec3, f32, f32) {
-    let center = (bounds_min + bounds_max) * 0.5;
-    let radius = ((bounds_max - bounds_min).length() * 0.5).max(1e-6);
-    let fov = fov_degrees.to_radians();
-    let distance = (radius / (fov * 0.5).sin()).max(radius) * padding;
-    (center, radius, distance)
-}
-
 /// Right/forward basis perpendicular to `up`.
 fn orthonormal_basis(up: Vec3) -> (Vec3, Vec3) {
     let up = up.normalize_or(Vec3::Y);
@@ -370,6 +505,49 @@ mod tests {
         c.set_up(Vec3::X);
         assert!((c.position() - pos).length() < 1e-5);
         assert!(c.up().dot(Vec3::X) > 0.999, "up={:?}", c.up());
+    }
+
+    #[test]
+    fn frame_fills_viewport_for_wide_mesh_on_wide_screen() {
+        // A wide, flat mesh on a 2:1 viewport should be framed by its
+        // projected extents, not the (much larger) 3D bounding-sphere
+        // diagonal — otherwise it fills a fraction of the screen.
+        let min = Vec3::new(-5.0, -0.5, -0.5);
+        let max = Vec3::new(5.0, 0.5, 0.5);
+        let c = Camera::frame_bounds_aspect(min, max, CameraKind::Orthographic, 60.0, 1.0, 2.0);
+
+        // Projected half-extents on the default view plane (right=+X, up=+Y):
+        // half_w=5, half_h=0.5. At aspect 2 the width fit dominates:
+        // half_v = tan(30°) ≈ 0.577, dist = half_w/(half_v*2) ≈ 4.33.
+        let expected = 5.0 / (30f32.to_radians().tan() * 2.0);
+        assert!(
+            (c.distance - expected).abs() < 0.05,
+            "distance={} expected≈{expected}",
+            c.distance
+        );
+        // Sphere-diagonal framing would give ~5.9 / tan(30°) ≈ 10.2 — over 2x
+        // too far. Guard against regressing to that.
+        assert!(c.distance < 6.0, "distance={} still too far", c.distance);
+    }
+
+    #[test]
+    fn frame_aspect_defaults_to_square() {
+        let a = Camera::frame_bounds(
+            Vec3::splat(-1.0),
+            Vec3::splat(1.0),
+            CameraKind::Perspective,
+            60.0,
+            1.0,
+        );
+        let b = Camera::frame_bounds_aspect(
+            Vec3::splat(-1.0),
+            Vec3::splat(1.0),
+            CameraKind::Perspective,
+            60.0,
+            1.0,
+            1.0,
+        );
+        assert_eq!(a.distance, b.distance);
     }
 
     #[test]
