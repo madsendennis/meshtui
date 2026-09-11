@@ -78,6 +78,9 @@ pub struct App {
     light_scale: f32,
     theme: Theme,
     status_message: Option<String>,
+    /// Viewport pixel aspect (width/height) used to fit the camera so meshes
+    /// fill wide viewports instead of swimming. 1.0 until the first render.
+    aspect: f32,
     dirty: bool,
     render_dirty: bool,
 }
@@ -172,9 +175,35 @@ impl App {
             light_scale: 1.0,
             theme,
             status_message: None,
+            aspect: -1.0, // sentinel: unset until set_aspect() before first frame
             dirty: true,
             render_dirty: true,
         }
+    }
+
+    /// Re-fit the initial framing to the real viewport aspect (width/height),
+    /// applied once before the first frame so the mesh fills the actual
+    /// viewport instead of a square estimate. No-op after that, so later
+    /// terminal resizes don't reset the user's zoom.
+    pub fn set_aspect(&mut self, aspect: f32) {
+        if self.aspect >= 0.0 {
+            return; // already applied (or set); only the first call reframes
+        }
+        let aspect = if aspect.is_finite() && aspect > 0.0 {
+            aspect
+        } else {
+            1.0
+        };
+        self.aspect = aspect;
+        if let Some((min, max)) = self.scene.visible_bounds() {
+            self.camera.reframe_bounds_aspect(
+                min,
+                max,
+                self.config.camera.distance_padding,
+                aspect,
+            );
+        }
+        self.render_dirty = true;
     }
 
     /// Re-resolve the theme (omarchy live-reload) and restyle without a
@@ -309,8 +338,8 @@ impl App {
             "view_plus_y" => self.camera.set_view_axis(ViewAxis::PosY),
             "view_minus_z" => self.camera.set_view_axis(ViewAxis::NegZ),
             "view_plus_z" => self.camera.set_view_axis(ViewAxis::PosZ),
-            "camera_orthographic" => self.camera.kind = CameraKind::Orthographic,
-            "camera_perspective" => self.camera.kind = CameraKind::Perspective,
+            "camera_orthographic" => self.set_camera_kind(CameraKind::Orthographic),
+            "camera_perspective" => self.set_camera_kind(CameraKind::Perspective),
             "up_vector_next" => self
                 .camera
                 .cycle_up(&self.config.view.up_vectors.clone(), true),
@@ -634,9 +663,25 @@ impl App {
     /// Recenter and refit zoom to currently visible meshes, keeping orbit.
     fn frame_visible_meshes(&mut self) {
         if let Some((min, max)) = self.scene.visible_bounds() {
-            self.camera
-                .reframe_bounds(min, max, self.config.camera.distance_padding);
+            self.camera.reframe_bounds_aspect(
+                min,
+                max,
+                self.config.camera.distance_padding,
+                self.aspect.max(1.0),
+            );
         }
+    }
+
+    /// Switch ortho/perspective and re-fit the zoom. The two projections frame
+    /// the same scene at different distances (ortho is depth-independent,
+    /// perspective fits the frustum), so keeping the old distance would clip
+    /// or over-zoom. The orbit (target, orientation) is preserved.
+    fn set_camera_kind(&mut self, kind: CameraKind) {
+        if self.camera.kind == kind {
+            return;
+        }
+        self.camera.kind = kind;
+        self.frame_visible_meshes();
     }
 
     fn reset_all(&mut self) {
@@ -653,8 +698,14 @@ impl App {
             let kind = self.camera.kind;
             let fov = self.camera.fov_degrees;
             let up = self.camera.up();
-            self.camera =
-                Camera::frame_bounds(min, max, kind, fov, self.config.camera.distance_padding);
+            self.camera = Camera::frame_bounds_aspect(
+                min,
+                max,
+                kind,
+                fov,
+                self.config.camera.distance_padding,
+                self.aspect.max(1.0),
+            );
             self.camera.set_up(up);
         }
     }
@@ -1301,12 +1352,24 @@ fn event_loop(app: &mut App, terminal: &mut DefaultTerminal) -> io::Result<()> {
         if app.dirty {
             terminal.draw(|f| app.draw_ui(f))?;
 
-            if app.render_dirty {
+            // Hide the mesh canvas while a modal is up: some terminals
+            // composite the low-z Kitty image over (or through) the modal's
+            // cells, making text unreadable. Deleting the placement is the
+            // only reliable occlusion; re-render the frame when it closes.
+            if app.modal.is_some() {
+                write!(out, "{}", delete_image(IMAGE_ID))?;
+                out.flush()?;
+                app.render_dirty = true; // restore the canvas after the modal
+            } else if app.render_dirty {
                 let area = terminal.size()?;
                 let (vx, vy, vw, vh) = viewport_rect(app, area.width as u32, area.height as u32);
                 if vw >= 4 && vh >= 2 {
                     let (px_w, px_h) =
                         pixel_size(app, area.width as u32, area.height as u32, vw, vh);
+                    // One-shot: fit the initial framing to the real viewport
+                    // aspect (no-op after the first frame, so resizes don't
+                    // reset the user's zoom).
+                    app.set_aspect(px_w as f32 / px_h as f32);
                     match app.render_frame(px_w, px_h) {
                         Some(frame) => {
                             transmit_frame(
@@ -1478,6 +1541,37 @@ mod tests {
         assert!(!app.handle_key("enter"));
         assert_eq!(app.camera.kind, CameraKind::Perspective);
         assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn switching_camera_kind_refits_distance_but_keeps_orientation() {
+        let mut app = app_with_meshes(&["mesh"]);
+        // Give the scene real extent and an orbit so we can verify they survive.
+        app.scene.meshes[0] = triangle_at("mesh", Vec3::ZERO, 4.0);
+        app.camera.orbit(0.4, -0.2);
+        let orientation = app.camera.orientation;
+        app.set_aspect(2.0);
+        app.frame_visible_meshes();
+
+        let ortho_distance = app.camera.distance;
+        app.execute_action("camera_perspective");
+        assert_eq!(app.camera.kind, CameraKind::Perspective);
+        let persp_distance = app.camera.distance;
+        assert_ne!(
+            ortho_distance, persp_distance,
+            "distance must be re-fit for the new projection"
+        );
+        assert_eq!(
+            app.camera.orientation, orientation,
+            "orbit must be preserved across the switch"
+        );
+
+        // Switching back to the same kind is a no-op for distance.
+        app.execute_action("camera_orthographic");
+        let back = app.camera.distance;
+        app.execute_action("camera_orthographic");
+        assert_eq!(app.camera.distance, back);
+        assert_eq!(app.camera.orientation, orientation);
     }
 
     #[test]
@@ -1689,6 +1783,46 @@ mod tests {
             terminal.draw(|frame| app.draw_ui(frame)).unwrap();
             let cell = terminal.backend().buffer().cell((50, 20)).unwrap();
             assert_ne!(cell.bg, TColor::Reset);
+        }
+    }
+
+    #[test]
+    fn command_palette_area_is_fully_opaque() {
+        let mut app = app_with_meshes(&["mesh"]);
+        app.modal = Some(Modal::CommandPalette {
+            query: String::new(),
+            selected: 0,
+        });
+        let backend = TestBackend::new(100, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw_ui(frame)).unwrap();
+        let buf = terminal.backend().buffer();
+        // Recompute the palette rect as draw_command_palette does, then assert
+        // every cell in it is opaque (so nothing bleeds through).
+        let commands = app.palette_matches("");
+        let max_items = app.config.ui.command_palette.max_visible_items;
+        let visible = &commands[..commands.len().min(max_items)];
+        let section_count = visible
+            .iter()
+            .map(|c| c.section)
+            .fold(Vec::<&str>::new(), |mut s, sec| {
+                if s.last().copied() != Some(sec) {
+                    s.push(sec);
+                }
+                s
+            })
+            .len();
+        let height = (visible.len() + section_count + 6) as u16;
+        let area = centered_rect_cells(70, height.min(buf.area.height.saturating_sub(2)), buf.area);
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let cell = buf.cell((x, y)).unwrap();
+                assert_ne!(
+                    cell.bg,
+                    TColor::Reset,
+                    "transparent cell at ({x},{y}) in command palette"
+                );
+            }
         }
     }
 

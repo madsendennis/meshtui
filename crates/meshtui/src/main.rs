@@ -198,8 +198,12 @@ fn run() -> Result<(), String> {
         app.camera.set_view_axis(axis);
     }
     match args.screenshot {
-        Some(path) => app::save_screenshot(&mut app, &path, args.size.0, args.size.1)
-            .map_err(|e| e.to_string()),
+        Some(path) => {
+            // Fit the camera to the actual output aspect before rendering.
+            app.set_aspect(args.size.0 as f32 / args.size.1 as f32);
+            app::save_screenshot(&mut app, &path, args.size.0, args.size.1)
+                .map_err(|e| e.to_string())
+        }
         None if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() => Err(
             "interactive mode requires a TTY; use --screenshot <output.png> for headless rendering"
                 .into(),
