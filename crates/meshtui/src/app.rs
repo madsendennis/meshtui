@@ -1432,12 +1432,15 @@ pub fn save_screenshot(
     let frame = app
         .render_frame(width, height)
         .ok_or_else(|| anyhow::anyhow!("nothing to screenshot: all meshes hidden"))?;
-    image::save_buffer(
-        path,
+    // Always PNG: yazi's preview cache path has no extension, so the format
+    // cannot be inferred from `path` and callers shouldn't depend on it.
+    image::write_buffer_with_format(
+        &mut std::io::BufWriter::new(std::fs::File::create(path)?),
         &frame.pixels,
         frame.width,
         frame.height,
         image::ColorType::Rgba8,
+        image::ImageFormat::Png,
     )?;
     Ok(())
 }
