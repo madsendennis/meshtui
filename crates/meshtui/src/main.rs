@@ -31,6 +31,8 @@ fn usage() -> &'static str {
      Options:\n\
      \x20 --config <path>     extra TOML config merged over the user config\n\
      \x20 --size <WxH>        screenshot size (default 1600x1200)\n\
+     \x20 --view <axis>        initial view axis: +x, -x, +y, -y, +z, -z\n\
+     \x20                     (with --screenshot; overrides view.default_axis)\n\
      \x20 --print-config      print the merged effective config and exit\n\
      \x20 --write-default-config[=<path>]\n\
      \x20                     write all defaults to the user config file\n\
@@ -47,6 +49,7 @@ struct Args {
     config: Option<PathBuf>,
     screenshot: Option<PathBuf>,
     size: (u32, u32),
+    view: Option<meshtui_core::ViewAxis>,
     print_config: bool,
     write_default_config: Option<Option<PathBuf>>,
 }
@@ -57,6 +60,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         config: None,
         screenshot: None,
         size: (1600, 1200),
+        view: None,
         print_config: false,
         write_default_config: None,
     };
@@ -79,6 +83,15 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             "--screenshot" => {
                 args.screenshot = Some(PathBuf::from(it.next().ok_or("--screenshot needs a path")?))
             }
+            "--view" => {
+                let axis = it
+                    .next()
+                    .ok_or("--view needs an axis (+x, -x, +y, -y, +z, -z)")?;
+                args.view = Some(
+                    meshtui_core::ViewAxis::parse(axis)
+                        .ok_or("--view must be one of +x, -x, +y, -y, +z, -z")?,
+                );
+            }
             "--size" => {
                 let s = it.next().ok_or("--size needs WxH")?;
                 let (w, h) = s.split_once('x').ok_or("--size format: WxH")?;
@@ -95,15 +108,25 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             other => args.meshes.push(PathBuf::from(other)),
         }
     }
+    Ok(args)
+}
+
+/// Validate options that are only meaningful together. Kept separate from
+/// `parse_args` so tests can cover the combinations directly.
+fn validate_args(args: &Args) -> Result<(), String> {
     if args.meshes.is_empty() && !args.print_config && args.write_default_config.is_none() {
         return Err(usage().to_string());
     }
-    Ok(args)
+    if args.view.is_some() && args.screenshot.is_none() {
+        return Err("--view only applies together with --screenshot".to_string());
+    }
+    Ok(())
 }
 
 fn run() -> Result<(), String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let args = parse_args(&argv)?;
+    validate_args(&args)?;
 
     // Config-only commands run without meshes.
     if let Some(target) = &args.write_default_config {
@@ -171,6 +194,9 @@ fn run() -> Result<(), String> {
     }
 
     let mut app = app::App::new(scene, config);
+    if let Some(axis) = args.view {
+        app.camera.set_view_axis(axis);
+    }
     match args.screenshot {
         Some(path) => app::save_screenshot(&mut app, &path, args.size.0, args.size.1)
             .map_err(|e| e.to_string()),
@@ -203,5 +229,40 @@ fn main() -> ExitCode {
             eprintln!("meshtui: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use meshtui_core::ViewAxis;
+
+    fn parse(argv: &[&str]) -> Result<Args, String> {
+        parse_args(&argv.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn view_parses_axis() {
+        let args = parse(&["m.ply", "--screenshot", "o.png", "--view", "+x"]).unwrap();
+        assert_eq!(args.view, Some(ViewAxis::PosX));
+        assert!(validate_args(&args).is_ok());
+    }
+
+    #[test]
+    fn view_rejects_bad_axis() {
+        assert!(parse(&["m.ply", "--screenshot", "o.png", "--view", "up"]).is_err());
+    }
+
+    #[test]
+    fn view_requires_screenshot() {
+        let args = parse(&["m.ply", "--view", "+z"]).unwrap();
+        assert!(validate_args(&args).is_err());
+    }
+
+    #[test]
+    fn screenshot_without_view_is_fine() {
+        let args = parse(&["m.ply", "--screenshot", "o.png"]).unwrap();
+        assert_eq!(args.view, None);
+        assert!(validate_args(&args).is_ok());
     }
 }

@@ -133,6 +133,70 @@ change together. Built-in alternatives can be selected explicitly:
 theme = "github_light" # also: light, nord, dracula, monokai, gruvbox
 ```
 
+## yazi integration
+
+MeshTUI ships a [yazi](https://yazi-rs.github.io) previewer plugin that renders
+PLY/STL/OBJ/DRC/GLB mesh files directly in the file manager's preview pane
+(Kitty graphics required). The plugin lives at
+[`integrations/yazi/meshtui.yazi`](integrations/yazi/meshtui.yazi/main.lua).
+
+### 1. Install the plugin
+
+Make sure `meshtui` is on your `PATH` (see [Install](#install)), then link or
+copy the plugin into yazi's plugin directory:
+
+```bash
+mkdir -p ~/.config/yazi/plugins
+ln -s /path/to/meshtui/integrations/yazi/meshtui.yazi ~/.config/yazi/plugins/
+```
+
+(If you installed from a release tarball, copy the plugin directory out of the
+source repo instead.)
+
+### 2. Preview mesh files
+
+Route mesh files to the previewer in `~/.config/yazi/yazi.toml`:
+
+```toml
+[plugin]
+prepend_previewers = [
+  { url = "*.{ply,stl,obj,drc,glb}", run = "meshtui" },
+]
+prepend_preloaders = [
+  { url = "*.{ply,stl,obj,drc,glb}", run = "meshtui" },
+]
+```
+
+Hover a mesh file and its rendered preview appears in the preview pane;
+previews are cached by yazi like image thumbnails. Rendering honors your
+MeshTUI config (theme, camera, lighting), and you can pick the preview angle
+via `view.default_axis` in `~/.config/meshtui/config.toml`.
+
+Folders keep yazi's built-in file listing — the plugin only renders single
+mesh files.
+
+### 3. Open in meshtui
+
+To **open** the hovered mesh file or folder in MeshTUI when you press `Enter`
+(or `o`), add an opener to `~/.config/yazi/yazi.toml`:
+
+```toml
+[opener]
+mesh = [
+  { run = 'meshtui %s1', block = true, desc = "View in meshtui" },
+]
+
+[open]
+prepend_rules = [
+  { url = "*.{ply,stl,obj,drc,glb}", use = "mesh" },
+  { url = "*/", use = "mesh" },
+]
+```
+
+`block = true` makes yazi yield the terminal to the MeshTUI TUI and come back
+when you quit. The `*/` rule makes `Enter` on a folder open all meshes inside
+it; drop that line if you prefer folders to just `cd` into themselves.
+
 ## Remote and headless servers
 
 The renderer is CPU-only, so a headless Ubuntu server needs no Vulkan, OpenGL,
