@@ -98,7 +98,8 @@ The side panel always shows the active selection controls:
 | `Space` | Toggle the active mesh |
 | `Ctrl+A` | Select every mesh currently shown by the filter |
 | `Ctrl+N` | Clear the selection |
-| `/` | Set or clear the filter |
+| `/` | Set the filter (submit an empty input to clear) |
+| `F` | Clear the filter |
 | `s` / `S` | Hide or show the selected meshes |
 | `c` / `C` | Cycle selected mesh colors |
 | `x` | Set a custom color |

@@ -411,6 +411,10 @@ impl App {
             "mesh_clear_filter" => {
                 self.set_mesh_filter("")
                     .expect("an empty mesh filter is always valid");
+                self.status_message = Some(format!(
+                    "filter cleared ({} meshes)",
+                    self.filtered_indices.len()
+                ));
                 rerender = false;
             }
             "animation_start" => {
@@ -913,14 +917,32 @@ impl App {
                         (mesh.color[1].clamp(0.0, 1.0) * 255.0).round() as u8,
                         (mesh.color[2].clamp(0.0, 1.0) * 255.0).round() as u8,
                     );
+                    // Style the selected row per-span instead of via
+                    // List::highlight_style, which is patched over the whole
+                    // row after rendering and would repaint the color dot
+                    // with the selection foreground.
+                    let is_selected = index == self.selected;
+                    let row_style = if is_selected {
+                        Style::default()
+                            .fg(theme.selection_foreground)
+                            .bg(theme.selection)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        panel_style
+                    };
+                    let dot_bg = if is_selected {
+                        theme.selection
+                    } else {
+                        theme.background
+                    };
                     ListItem::new(Line::from(vec![
                         Span::styled(
                             format!("{marked} {vis} "),
-                            Style::default().fg(color).bg(theme.background),
+                            Style::default().fg(color).bg(dot_bg),
                         ),
-                        Span::styled(truncate(&mesh.name, 19), panel_style),
+                        Span::styled(truncate(&mesh.name, 19), row_style),
                     ]))
-                    .style(panel_style)
+                    .style(row_style)
                 })
                 .collect();
             let count = format!("{}/{}", mesh_indices.len(), self.scene.meshes.len());
@@ -938,12 +960,6 @@ impl App {
                         .style(panel_style),
                 )
                 .style(panel_style)
-                .highlight_style(
-                    Style::default()
-                        .fg(theme.selection_foreground)
-                        .bg(theme.selection)
-                        .add_modifier(Modifier::BOLD),
-                )
                 .highlight_symbol("> ");
             let mut state = ListState::default();
             if let Some(position) = mesh_indices
@@ -974,9 +990,15 @@ impl App {
             );
             let filter_key =
                 key_label(&self.config.key("mesh_filter").unwrap_or_else(|| "-".into()));
+            let clear_key = key_label(
+                &self
+                    .config
+                    .key("mesh_clear_filter")
+                    .unwrap_or_else(|| "-".into()),
+            );
             f.render_widget(
                 Paragraph::new(format!(
-                    " {all_key} all | {none_key} none\n {mark_key} toggle | {filter_key} filter"
+                    " {all_key} all | {none_key} none | {mark_key} mark\n {filter_key} filter | {clear_key} clear"
                 ))
                 .style(Style::default().fg(theme.muted).bg(theme.background)),
                 sp_rows[1],
@@ -1529,6 +1551,77 @@ mod tests {
             scene.meshes.push(triangle_at(name, Vec3::ZERO, 1.0));
         }
         App::new(scene, Config::load(None).unwrap())
+    }
+
+    #[test]
+    fn clear_filter_action_restores_all_meshes() {
+        let mut app = app_with_meshes(&["beta", "alpha", "alpine"]);
+        app.set_mesh_filter("alp").unwrap();
+        assert_eq!(app.mesh_indices().len(), 2);
+        app.execute_action("mesh_clear_filter");
+        assert_eq!(app.mesh_indices().len(), 3, "clearing restores every mesh");
+        assert!(app.mesh_filter.is_empty());
+    }
+
+    #[test]
+    fn clear_filter_runs_from_the_command_palette() {
+        let mut app = app_with_meshes(&["beta", "alpha", "alpine"]);
+        app.set_mesh_filter("alp").unwrap();
+        assert!(!app.handle_key("?"));
+        for ch in "clear filter".chars() {
+            let key = if ch == ' ' {
+                "space".to_string()
+            } else {
+                ch.to_string()
+            };
+            assert!(!app.handle_key(&key));
+        }
+        assert!(!app.handle_key("enter"));
+        assert!(app.modal.is_none(), "palette closed");
+        assert_eq!(app.mesh_indices().len(), 3, "palette cleared the filter");
+    }
+
+    #[test]
+    fn clear_filter_has_a_default_keybinding() {
+        let app = app_with_meshes(&["mesh"]);
+        let key = app.config.key("mesh_clear_filter");
+        assert!(key.is_some(), "mesh_clear_filter must be bound by default");
+        assert_eq!(
+            app.action_for_key(&key.unwrap()).as_deref(),
+            Some("mesh_clear_filter")
+        );
+    }
+
+    #[test]
+    fn selected_sidebar_row_keeps_the_mesh_color_dot() {
+        let mut app = app_with_meshes(&["alpha"]);
+        app.scene.meshes[0].color = [1.0, 0.0, 0.0, 1.0];
+        let backend = TestBackend::new(100, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw_ui(frame)).unwrap();
+        let buf = terminal.backend().buffer();
+        let (dot_pos, dot) = buf
+            .content()
+            .iter()
+            .enumerate()
+            .find(|(_, cell)| cell.symbol() == "●")
+            .expect("visible mesh dot");
+        assert_eq!(
+            dot.fg,
+            TColor::Rgb(255, 0, 0),
+            "selected row must keep the mesh color on the dot"
+        );
+        assert_eq!(
+            dot.bg, app.theme.selection,
+            "dot sits on the selection background"
+        );
+        // The mesh name on the same row still uses the selection colors.
+        let y = dot_pos as u16 / buf.area.width;
+        let name_cell = (0..buf.area.width)
+            .map(|x| buf.cell((x, y)).unwrap())
+            .find(|cell| cell.symbol() == "a")
+            .expect("mesh name cell");
+        assert_eq!(name_cell.fg, app.theme.selection_foreground);
     }
 
     #[test]

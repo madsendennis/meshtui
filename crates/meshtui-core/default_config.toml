@@ -170,6 +170,7 @@ mesh_toggle_mark = "space"
 mesh_select_all = "ctrl+a"             # Select all meshes matching the current filter
 mesh_select_none = "ctrl+n"            # Clear the mesh selection
 mesh_filter = "/"
+mesh_clear_filter = "F"                # Clear the mesh-name filter
 
 # Animation controls
 animation_start = "a"

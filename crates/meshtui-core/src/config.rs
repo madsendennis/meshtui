@@ -336,6 +336,7 @@ fn default_keybindings() -> HashMap<String, toml::Value> {
         ("mesh_select_all", "ctrl+a"),
         ("mesh_select_none", "ctrl+n"),
         ("mesh_filter", "/"),
+        ("mesh_clear_filter", "F"),
         ("animation_start", "a"),
         ("animation_stop", "A"),
         ("sidepanel_move_up", "up"),
