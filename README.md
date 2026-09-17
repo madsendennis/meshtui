@@ -77,6 +77,9 @@ meshtui info ./models --json | jq '.totals'
 # diagonals, or an N-step turntable ring) into numbered PNGs
 meshtui screenshot model.ply --views all --out-dir shots/
 meshtui screenshot model.ply --views ring:12 --prefix gear
+
+# Or all 6 axis views composited into one PNG (2 rows x 3 cols)
+meshtui screenshot model.ply --views grid --size 1920x1280
 ```
 
 ## Configuration

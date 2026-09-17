@@ -131,6 +131,8 @@ enum ViewSet {
     All,
     Iso,
     Ring(u32),
+    /// The 6 axis views composited into one 3×2 contact-sheet PNG.
+    Grid,
 }
 
 fn parse_size(s: &str) -> Result<(u32, u32), String> {
@@ -153,12 +155,13 @@ fn parse_view_set(s: &str) -> Result<ViewSet, String> {
     match s {
         "all" => Ok(ViewSet::All),
         "iso" => Ok(ViewSet::Iso),
+        "grid" => Ok(ViewSet::Grid),
         other => {
             let count = other
                 .strip_prefix("ring:")
                 .and_then(|n| n.parse::<u32>().ok())
                 .filter(|n| (2..=64).contains(n))
-                .ok_or("--views must be all, iso, or ring:N with N in 2..=64")?;
+                .ok_or("--views must be all, iso, grid, or ring:N with N in 2..=64")?;
             Ok(ViewSet::Ring(count))
         }
     }
@@ -220,6 +223,7 @@ fn view_specs(set: &ViewSet, up: glam::Vec3) -> Vec<ViewSpec> {
                 })
                 .collect()
         }
+        ViewSet::Grid => Vec::new(), // handled separately: composite, not files
     }
 }
 
@@ -405,7 +409,6 @@ fn run_screenshot(
     let up = glam::Vec3::from(config.view.up_vectors[0]);
 
     let mut app = app::App::new(scene, config);
-    app.set_aspect(size.0 as f32 / size.1 as f32);
 
     let prefix = prefix.map(String::from).unwrap_or_else(|| {
         mesh_path
@@ -428,25 +431,85 @@ fn run_screenshot(
     };
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
 
+    if matches!(set, ViewSet::Grid) {
+        let path = dir.join(format!("{prefix}_grid.png"));
+        write_view_grid(&mut app, &path, size, up)?;
+        println!("{}", path.display());
+        return Ok(());
+    }
+
     for spec in view_specs(set, up) {
-        if let Some(dir_vec) = spec.dir {
-            let up = if dir_vec.dot(app.camera.up()).abs() > 0.99 {
-                // View along the up axis: pick any perpendicular up.
-                if dir_vec.dot(glam::Vec3::Y).abs() > 0.99 {
-                    glam::Vec3::Z
-                } else {
-                    glam::Vec3::Y
-                }
-            } else {
-                app.camera.up()
-            };
-            app.camera.orientation = meshtui_core::camera::look_rotation(dir_vec, up);
-        }
+        pose_camera(&mut app, &spec);
         let path = dir.join(format!("{prefix}_{}.png", spec.suffix));
         app::save_screenshot(&mut app, &path, size.0, size.1).map_err(|e| e.to_string())?;
         println!("{}", path.display());
     }
     Ok(())
+}
+
+/// Pose the camera for a planned view (no-op when the spec has no override).
+fn pose_camera(app: &mut app::App, spec: &ViewSpec) {
+    let Some(dir_vec) = spec.dir else { return };
+    let up = if dir_vec.dot(app.camera.up()).abs() > 0.99 {
+        // View along the up axis: pick any perpendicular up.
+        if dir_vec.dot(glam::Vec3::Y).abs() > 0.99 {
+            glam::Vec3::Z
+        } else {
+            glam::Vec3::Y
+        }
+    } else {
+        app.camera.up()
+    };
+    app.camera.orientation = meshtui_core::camera::look_rotation(dir_vec, up);
+}
+
+/// The 6 axis views composited into one 3×2 contact sheet. Each cell is
+/// rendered at (W/3, H/2) so a landscape `--size WxH` yields roughly square
+/// cells; the PNG is exactly WxH.
+fn write_view_grid(
+    app: &mut app::App,
+    path: &std::path::Path,
+    size: (u32, u32),
+    up: glam::Vec3,
+) -> Result<(), String> {
+    let (w, h) = size;
+    let cell_w = (w / 3).max(1);
+    let cell_h = (h / 2).max(1);
+    app.set_aspect(cell_w as f32 / cell_h as f32);
+    let mut pixels = vec![0u8; (w * h * 4) as usize];
+    for (i, spec) in view_specs(&ViewSet::All, up).iter().enumerate() {
+        pose_camera(app, spec);
+        let frame = app
+            .render_frame(cell_w, cell_h)
+            .ok_or("nothing to screenshot: all meshes hidden")?;
+        // Top row: +x -x +y; bottom row: -y +z -z (spec order is already the
+        // axis order, so place them 3 per row).
+        let col = (i % 3) as u32;
+        let row = (i / 3) as u32;
+        blit(&mut pixels, w, &frame, col * cell_w, row * cell_h);
+    }
+    image::write_buffer_with_format(
+        &mut std::io::BufWriter::new(std::fs::File::create(path).map_err(|e| e.to_string())?),
+        &pixels,
+        w,
+        h,
+        image::ColorType::Rgba8,
+        image::ImageFormat::Png,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Copy `frame` into the RGBA `canvas` (width `canvas_w`) at offset (ox, oy),
+/// clipping to the canvas.
+fn blit(canvas: &mut [u8], canvas_w: u32, frame: &meshtui_render::Frame, ox: u32, oy: u32) {
+    let canvas_h = canvas.len() as u32 / canvas_w / 4;
+    for y in 0..frame.height.min(canvas_h.saturating_sub(oy)) {
+        let dst = ((oy + y) * canvas_w + ox) as usize * 4;
+        let src = (y * frame.width) as usize * 4;
+        let width = (frame.width.min(canvas_w.saturating_sub(ox)) * 4) as usize;
+        canvas[dst..dst + width].copy_from_slice(&frame.pixels[src..src + width]);
+    }
 }
 
 fn run(cli: Cli) -> Result<(), String> {
@@ -682,6 +745,7 @@ mod tests {
     fn view_set_parses_all_iso_ring() {
         assert!(matches!(parse_view_set("all").unwrap(), ViewSet::All));
         assert!(matches!(parse_view_set("iso").unwrap(), ViewSet::Iso));
+        assert!(matches!(parse_view_set("grid").unwrap(), ViewSet::Grid));
         assert!(matches!(
             parse_view_set("ring:8").unwrap(),
             ViewSet::Ring(8)
@@ -690,6 +754,24 @@ mod tests {
         assert!(parse_view_set("ring:65").is_err());
         assert!(parse_view_set("ring:x").is_err());
         assert!(parse_view_set("front").is_err());
+    }
+
+    #[test]
+    fn blit_clips_and_copies() {
+        // 2x1 red frame onto a 4x2 canvas at (3, 1): the rightmost column
+        // clips off the 4-wide edge.
+        let mut canvas = vec![0u8; 4 * 2 * 4];
+        let frame = meshtui_render::Frame {
+            width: 2,
+            height: 1,
+            pixels: vec![255, 0, 0, 255, 255, 0, 0, 255],
+        };
+        blit(&mut canvas, 4, &frame, 3, 1);
+        // Only the first frame pixel lands (col 3, row 1); col 4 is clipped.
+        let (col, row) = (3usize, 1usize);
+        let px = (row * 4 + col) * 4;
+        assert_eq!(&canvas[px..px + 4], &[255, 0, 0, 255]);
+        assert!(canvas[..px].iter().all(|&b| b == 0), "nothing above offset");
     }
 
     #[test]
