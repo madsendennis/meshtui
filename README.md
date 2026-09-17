@@ -68,6 +68,10 @@ meshtui model.ply \
 
 # Merge an extra configuration over the user config for one run
 meshtui model.ply --config config.toml
+
+# Print mesh statistics (MeshLab-style), human-readable or JSON
+meshtui info model.ply
+meshtui info ./models --json | jq '.totals'
 ```
 
 ## Configuration
@@ -115,6 +119,15 @@ The side panel always shows the active selection controls:
 Deleting applies to the marked meshes, or the active row when nothing is
 marked — the same scoping as hide/show. Deleted meshes stay on an undo stack
 (32 levels) instead of asking for confirmation.
+
+## `meshtui info`
+
+`meshtui info <mesh...>` prints MeshLab-style statistics for each file or
+directory: vertex/face/edge counts, bounding box (min/max/size/diagonal/
+center), surface area, signed volume, and the authored color. `--json`
+emits the same data machine-readably (with per-mesh `source` and `format`),
+and errors become JSON on stderr, so scripts can rely on
+`if meshtui info m.ply --json; then ...`.
 
 A normal filter is a case-insensitive substring. Prefix with `re:` for a
 case-insensitive regular expression, or `!` to invert:

@@ -2,11 +2,13 @@
 
 pub mod camera;
 pub mod config;
+pub mod info;
 pub mod loaders;
 pub mod mesh;
 pub mod scene;
 
 pub use camera::{Camera, CameraKind, ViewAxis};
+pub use info::MeshInfo;
 pub use mesh::Mesh;
 pub use scene::Scene;
 

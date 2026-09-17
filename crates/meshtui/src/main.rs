@@ -2,8 +2,8 @@
 //!
 //! Usage:
 //!   meshtui <mesh> [more meshes...]   launch the TUI
-//!   meshtui <mesh> --screenshot out.png [--size WxH]   headless render
-//!   meshtui --config user.toml ...
+//!   meshtui <mesh...> --screenshot out.png [--size WxH] [--view <axis>]
+//!   meshtui info <mesh...> [--json]   mesh statistics
 //!
 //! Exit codes: 0 success, 1 error (unlike the Python version, where Typer
 //! swallowed the return value and every failure exited 0).
@@ -12,136 +12,283 @@ mod app;
 mod commands;
 
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
+use clap::{Parser, Subcommand};
+use serde::Serialize;
+
 use meshtui_core::config::{self, Config};
-use meshtui_core::loaders::load_meshes;
-use meshtui_core::Scene;
+use meshtui_core::loaders::{load_path, load_path_detailed};
+use meshtui_core::{MeshInfo, Scene, ViewAxis};
 
-fn usage() -> &'static str {
-    "meshtui — terminal 3D mesh viewer\n\
-     \n\
-     Usage:\n\
-     \x20 meshtui <mesh> [more meshes...]              launch the TUI\n\
-     \x20 meshtui <mesh...> --screenshot out.png       headless render to PNG\n\
-     \n\
-     Supported formats: .ply, .stl, .obj, .drc, .glb\n\
-     \n\
-     Options:\n\
-     \x20 --config <path>     extra TOML config merged over the user config\n\
-     \x20 --size <WxH>        screenshot size (default 1600x1200)\n\
-     \x20 --view <axis>        initial view axis: +x, -x, +y, -y, +z, -z\n\
-     \x20                     (with --screenshot; overrides view.default_axis)\n\
-     \x20 --print-config      print the merged effective config and exit\n\
-     \x20 --write-default-config[=<path>]\n\
-     \x20                     write all defaults to the user config file\n\
-     \x20                     (default: ~/.config/meshtui/config.toml)\n\
-     \x20 --version           print the version and exit\n\
-     \x20 --help              this message\n\
-     \n\
-     The user config is created with all defaults on first run and loaded\n\
-     on every run. Precedence: embedded defaults < user config < --config."
-}
+const LONG_ABOUT: &str = "\
+Terminal 3D mesh viewer using the Kitty graphics protocol.
 
-struct Args {
+Interactive:  meshtui <mesh.ply> [more meshes or directories...]
+Headless:     meshtui <mesh...> --screenshot out.png [--size WxH] [--view +x]
+Statistics:   meshtui info <mesh...> [--json]
+
+Supported formats: .ply, .stl, .obj, .drc, .glb
+Directories load every supported mesh inside (sorted, non-recursive).
+Exit codes: 0 success, 1 error.
+Config precedence: embedded defaults < ~/.config/meshtui/config.toml < --config.";
+
+/// meshtui — terminal 3D mesh viewer.
+#[derive(Debug, Parser)]
+#[command(name = "meshtui", version, about, long_about = LONG_ABOUT)]
+#[command(subcommand_precedence_over_arg = true)]
+struct Cli {
+    /// Mesh files or directories to open in the TUI
+    #[arg(value_name = "MESH")]
     meshes: Vec<PathBuf>,
+
+    /// Extra TOML config merged over the user config
+    #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
+
+    /// Headless render to PNG instead of launching the TUI
+    #[arg(long, value_name = "OUT.png")]
     screenshot: Option<PathBuf>,
+
+    /// Screenshot size, WxH (1..=4096 per side)
+    #[arg(long, default_value = "1600x1200", value_parser = parse_size)]
     size: (u32, u32),
-    view: Option<meshtui_core::ViewAxis>,
+
+    /// Initial view axis (only with --screenshot)
+    #[arg(long, value_name = "AXIS", value_parser = parse_view)]
+    view: Option<ViewAxis>,
+
+    /// Print the merged effective config and exit
+    #[arg(long)]
     print_config: bool,
-    write_default_config: Option<Option<PathBuf>>,
+
+    /// Write all defaults to PATH (default: the user config file) and exit
+    #[arg(
+        long,
+        value_name = "PATH",
+        num_args = 0..=1,
+        default_missing_value = "",
+        value_parser = parse_optional_path
+    )]
+    write_default_config: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
 }
 
-fn parse_args(argv: &[String]) -> Result<Args, String> {
-    let mut args = Args {
-        meshes: Vec::new(),
-        config: None,
-        screenshot: None,
-        size: (1600, 1200),
-        view: None,
-        print_config: false,
-        write_default_config: None,
-    };
-    let mut it = argv.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--help" | "-h" => return Err(usage().to_string()),
-            "--config" => {
-                args.config = Some(PathBuf::from(it.next().ok_or("--config needs a path")?))
-            }
-            "--print-config" => args.print_config = true,
-            "--write-default-config" => args.write_default_config = Some(None),
-            other if other.starts_with("--write-default-config=") => {
-                let path = &other["--write-default-config=".len()..];
-                if path.is_empty() {
-                    return Err("--write-default-config=<path> needs a non-empty path".into());
-                }
-                args.write_default_config = Some(Some(PathBuf::from(path)));
-            }
-            "--screenshot" => {
-                args.screenshot = Some(PathBuf::from(it.next().ok_or("--screenshot needs a path")?))
-            }
-            "--view" => {
-                let axis = it
-                    .next()
-                    .ok_or("--view needs an axis (+x, -x, +y, -y, +z, -z)")?;
-                args.view = Some(
-                    meshtui_core::ViewAxis::parse(axis)
-                        .ok_or("--view must be one of +x, -x, +y, -y, +z, -z")?,
-                );
-            }
-            "--size" => {
-                let s = it.next().ok_or("--size needs WxH")?;
-                let (w, h) = s.split_once('x').ok_or("--size format: WxH")?;
-                args.size = (
-                    w.parse().map_err(|_| "bad width")?,
-                    h.parse().map_err(|_| "bad height")?,
-                );
-                if args.size.0 == 0 || args.size.1 == 0 || args.size.0 > 4096 || args.size.1 > 4096
-                {
-                    return Err("--size dimensions must be between 1 and 4096".into());
-                }
-            }
-            other if other.starts_with("--") => return Err(format!("unknown option {other}")),
-            other => args.meshes.push(PathBuf::from(other)),
-        }
-    }
-    Ok(args)
+#[derive(Debug, Subcommand)]
+enum Commands {
+    /// Print mesh statistics: counts, bounds, surface area, volume
+    Info {
+        /// Mesh files or directories
+        #[arg(value_name = "MESH", required = true)]
+        meshes: Vec<PathBuf>,
+        /// Machine-readable JSON output (errors are JSON on stderr)
+        #[arg(long)]
+        json: bool,
+    },
 }
 
-/// Validate options that are only meaningful together. Kept separate from
-/// `parse_args` so tests can cover the combinations directly.
-fn validate_args(args: &Args) -> Result<(), String> {
-    if args.meshes.is_empty() && !args.print_config && args.write_default_config.is_none() {
-        return Err(usage().to_string());
+fn parse_size(s: &str) -> Result<(u32, u32), String> {
+    let (w, h) = s.split_once('x').ok_or("--size format: WxH")?;
+    let size = (
+        w.parse().map_err(|_| "bad width")?,
+        h.parse().map_err(|_| "bad height")?,
+    );
+    if size.0 == 0 || size.1 == 0 || size.0 > 4096 || size.1 > 4096 {
+        return Err("--size dimensions must be between 1 and 4096".into());
     }
-    if args.view.is_some() && args.screenshot.is_none() {
-        return Err("--view only applies together with --screenshot".to_string());
+    Ok(size)
+}
+
+fn parse_view(s: &str) -> Result<ViewAxis, String> {
+    ViewAxis::parse(s).ok_or("--view must be one of +x, -x, +y, -y, +z, -z".into())
+}
+
+/// clap's built-in PathBuf parser rejects the empty `default_missing_value`
+/// used for a bare `--write-default-config`; this one passes it through so
+/// the empty path can mean "the default user config location".
+fn parse_optional_path(s: &str) -> Result<PathBuf, String> {
+    Ok(PathBuf::from(s))
+}
+
+/// Validate flag combinations that clap cannot express. Kept separate from
+/// `run` so tests can cover the combinations without side effects.
+fn validate_cli(cli: &Cli) -> Result<(), String> {
+    if cli.command.is_some() {
+        return Ok(());
+    }
+    if cli.meshes.is_empty() && !cli.print_config && cli.write_default_config.is_none() {
+        return Err("no meshes given (see --help)".into());
+    }
+    if cli.view.is_some() && cli.screenshot.is_none() {
+        return Err("--view only applies together with --screenshot".into());
     }
     Ok(())
 }
 
-fn run() -> Result<(), String> {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    let args = parse_args(&argv)?;
-    validate_args(&args)?;
+/// One mesh in an `info` report: where it came from plus its statistics.
+#[derive(Serialize)]
+struct MeshEntry {
+    source: PathBuf,
+    format: String,
+    #[serde(flatten)]
+    info: MeshInfo,
+}
+
+#[derive(Serialize)]
+struct InfoTotals {
+    meshes: usize,
+    vertices: usize,
+    faces: usize,
+    surface_area: f64,
+    signed_volume: f64,
+}
+
+#[derive(Serialize)]
+struct InfoReport {
+    meshes: Vec<MeshEntry>,
+    totals: InfoTotals,
+}
+
+/// `meshtui info`: MeshLab-style per-mesh statistics, human-readable or JSON.
+fn run_info(paths: &[PathBuf], json: bool) -> Result<(), String> {
+    let mut entries = Vec::new();
+    for path in paths {
+        let loaded = load_path_detailed(path).map_err(|e| {
+            if json {
+                // Machine-readable error on stderr keeps stdout parseable;
+                // the empty message tells main not to repeat it as text.
+                let message = e.to_string();
+                let quoted =
+                    serde_json::to_string(&message).unwrap_or_else(|_| format!("{message:?}"));
+                eprintln!("{{\"error\": {quoted}}}");
+                return String::new();
+            }
+            e.to_string()
+        })?;
+        for (source, mesh) in loaded {
+            let format = if source.is_file() {
+                source
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_ascii_lowercase())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            entries.push(MeshEntry {
+                source,
+                format,
+                info: MeshInfo::from_mesh(&mesh),
+            });
+        }
+    }
+    let totals = InfoTotals {
+        meshes: entries.len(),
+        vertices: entries.iter().map(|e| e.info.vertices).sum(),
+        faces: entries.iter().map(|e| e.info.faces).sum(),
+        surface_area: entries.iter().map(|e| e.info.surface_area).sum(),
+        signed_volume: entries.iter().map(|e| e.info.signed_volume).sum(),
+    };
+    if json {
+        let report = InfoReport {
+            meshes: entries,
+            totals,
+        };
+        let text = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
+        println!("{text}");
+    } else {
+        print_human_info(&entries, &totals);
+    }
+    Ok(())
+}
+
+fn print_human_info(entries: &[MeshEntry], totals: &InfoTotals) {
+    for (i, entry) in entries.iter().enumerate() {
+        if i > 0 {
+            println!();
+        }
+        let info = &entry.info;
+        println!("{} ({})", entry.source.display(), entry.format);
+        let stem = entry
+            .source
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        if info.name != stem {
+            // Multi-geometry files name each mesh; show it when it differs.
+            println!("  name:          {}", info.name);
+        }
+        println!("  vertices:      {}", info.vertices);
+        println!("  faces:         {}", info.faces);
+        println!("  edges:         {}", info.edges);
+        match &info.bounds {
+            Some(bounds) => {
+                let [sx, sy, sz] = bounds.size;
+                println!(
+                    "  bounds min:    ({:.3}, {:.3}, {:.3})",
+                    bounds.min[0], bounds.min[1], bounds.min[2]
+                );
+                println!(
+                    "  bounds max:    ({:.3}, {:.3}, {:.3})",
+                    bounds.max[0], bounds.max[1], bounds.max[2]
+                );
+                println!(
+                    "  bounds size:   {sx:.3} x {sy:.3} x {sz:.3}  (diagonal {:.3})",
+                    bounds.diagonal
+                );
+                println!(
+                    "  center:        ({:.3}, {:.3}, {:.3})",
+                    bounds.center[0], bounds.center[1], bounds.center[2]
+                );
+            }
+            None => println!("  bounds:        (empty mesh)"),
+        }
+        println!("  surface area:  {:.6}", info.surface_area);
+        println!(
+            "  volume:        {:.6} (signed; meaningful for closed meshes)",
+            info.signed_volume
+        );
+        match info.authored_color {
+            Some([r, g, b, a]) => {
+                println!("  color:         authored [{r:.2}, {g:.2}, {b:.2}, {a:.2}]")
+            }
+            None => println!("  color:         default (no authored color)"),
+        }
+    }
+    if entries.len() > 1 {
+        println!();
+        println!(
+            "totals: {} meshes, {} vertices, {} faces, surface area {:.6}",
+            totals.meshes, totals.vertices, totals.faces, totals.surface_area
+        );
+    }
+}
+
+fn run(cli: Cli) -> Result<(), String> {
+    validate_cli(&cli)?;
+
+    if let Some(Commands::Info { meshes, json }) = &cli.command {
+        return run_info(meshes, *json);
+    }
 
     // Config-only commands run without meshes.
-    if let Some(target) = &args.write_default_config {
-        let path = match target {
-            Some(p) => p.clone(),
-            None => config::user_config_path()
-                .ok_or("could not determine user config directory (is HOME set?)")?,
+    if let Some(path) = &cli.write_default_config {
+        let path = if path.as_os_str().is_empty() {
+            config::user_config_path()
+                .ok_or("could not determine user config directory (is HOME set?)")?
+        } else {
+            path.clone()
         };
         config::write_default_config(&path).map_err(|e| e.to_string())?;
         println!("wrote default config to {}", path.display());
         return Ok(());
     }
-    if args.print_config {
+    if cli.print_config {
         let text =
-            config::effective_config_toml(args.config.as_deref()).map_err(|e| e.to_string())?;
+            config::effective_config_toml(cli.config.as_deref()).map_err(|e| e.to_string())?;
         println!("{text}");
         return Ok(());
     }
@@ -154,38 +301,11 @@ fn run() -> Result<(), String> {
         Err(e) => eprintln!("meshtui: warning: could not write user config: {e}"),
     }
 
-    let config = Config::load_effective(args.config.as_deref()).map_err(|e| e.to_string())?;
+    let config = Config::load_effective(cli.config.as_deref()).map_err(|e| e.to_string())?;
 
     let mut scene = Scene::new();
-    let mut paths: Vec<PathBuf> = Vec::new();
-    for path in &args.meshes {
-        if path.is_dir() {
-            // Directory: load every supported mesh file inside (sorted,
-            // non-recursive — matches the Python mesh explorer).
-            let mut entries = Vec::new();
-            for entry in std::fs::read_dir(path).map_err(|e| e.to_string())? {
-                let entry = entry.map_err(|e| e.to_string())?;
-                let path = entry.path();
-                if path.is_file()
-                    && matches!(
-                        path.extension()
-                            .and_then(|e| e.to_str())
-                            .map(str::to_ascii_lowercase)
-                            .as_deref(),
-                        Some("stl" | "obj" | "ply" | "drc" | "glb")
-                    )
-                {
-                    entries.push(path);
-                }
-            }
-            entries.sort();
-            paths.extend(entries);
-        } else {
-            paths.push(path.clone());
-        }
-    }
-    for path in &paths {
-        for mesh in load_meshes(Path::new(path)).map_err(|e| e.to_string())? {
+    for path in &cli.meshes {
+        for mesh in load_path(path).map_err(|e| e.to_string())? {
             scene.meshes.push(mesh);
         }
     }
@@ -194,15 +314,14 @@ fn run() -> Result<(), String> {
     }
 
     let mut app = app::App::new(scene, config);
-    if let Some(axis) = args.view {
+    if let Some(axis) = cli.view {
         app.camera.set_view_axis(axis);
     }
-    match args.screenshot {
+    match cli.screenshot {
         Some(path) => {
             // Fit the camera to the actual output aspect before rendering.
-            app.set_aspect(args.size.0 as f32 / args.size.1 as f32);
-            app::save_screenshot(&mut app, &path, args.size.0, args.size.1)
-                .map_err(|e| e.to_string())
+            app.set_aspect(cli.size.0 as f32 / cli.size.1 as f32);
+            app::save_screenshot(&mut app, &path, cli.size.0, cli.size.1).map_err(|e| e.to_string())
         }
         None if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() => Err(
             "interactive mode requires a TTY; use --screenshot <output.png> for headless rendering"
@@ -213,24 +332,36 @@ fn run() -> Result<(), String> {
 }
 
 fn main() -> ExitCode {
-    if std::env::args()
-        .skip(1)
-        .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
-    {
-        println!("{}", usage());
-        return ExitCode::SUCCESS;
+    // Rust ignores SIGPIPE, so a closed stdout (e.g. `meshtui info ... |
+    // head`) panics on println!. Restore the default: die silently like a
+    // normal Unix tool.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
-    if std::env::args()
-        .skip(1)
-        .any(|arg| matches!(arg.as_str(), "--version" | "-V"))
-    {
-        println!("meshtui {}", env!("CARGO_PKG_VERSION"));
-        return ExitCode::SUCCESS;
-    }
-    match run() {
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            // Preserve the documented exit codes: 0 for --help/--version
+            // output, 1 for usage errors (clap itself would exit 2).
+            if matches!(
+                e.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) {
+                print!("{e}");
+                return ExitCode::SUCCESS;
+            }
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("meshtui: {e}");
+            // Empty message: already reported (e.g. as JSON by `info`).
+            if !e.is_empty() {
+                eprintln!("meshtui: {e}");
+            }
             ExitCode::FAILURE
         }
     }
@@ -239,34 +370,105 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use meshtui_core::ViewAxis;
 
-    fn parse(argv: &[&str]) -> Result<Args, String> {
-        parse_args(&argv.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    fn parse(argv: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(argv.iter().copied())
     }
 
     #[test]
     fn view_parses_axis() {
-        let args = parse(&["m.ply", "--screenshot", "o.png", "--view", "+x"]).unwrap();
-        assert_eq!(args.view, Some(ViewAxis::PosX));
-        assert!(validate_args(&args).is_ok());
+        let cli = parse(&["meshtui", "m.ply", "--screenshot", "o.png", "--view", "+x"]).unwrap();
+        assert_eq!(cli.view, Some(ViewAxis::PosX));
+        assert!(validate_cli(&cli).is_ok());
     }
 
     #[test]
     fn view_rejects_bad_axis() {
-        assert!(parse(&["m.ply", "--screenshot", "o.png", "--view", "up"]).is_err());
+        assert!(parse(&["meshtui", "m.ply", "--screenshot", "o.png", "--view", "up"]).is_err());
     }
 
     #[test]
     fn view_requires_screenshot() {
-        let args = parse(&["m.ply", "--view", "+z"]).unwrap();
-        assert!(validate_args(&args).is_err());
+        let cli = parse(&["meshtui", "m.ply", "--view", "+z"]).unwrap();
+        assert!(validate_cli(&cli).is_err());
     }
 
     #[test]
     fn screenshot_without_view_is_fine() {
-        let args = parse(&["m.ply", "--screenshot", "o.png"]).unwrap();
-        assert_eq!(args.view, None);
-        assert!(validate_args(&args).is_ok());
+        let cli = parse(&["meshtui", "m.ply", "--screenshot", "o.png"]).unwrap();
+        assert!(cli.view.is_none());
+        assert!(validate_cli(&cli).is_ok());
+    }
+
+    #[test]
+    fn size_parses_and_validates_bounds() {
+        let cli = parse(&[
+            "meshtui",
+            "m.ply",
+            "--screenshot",
+            "o.png",
+            "--size",
+            "800x600",
+        ])
+        .unwrap();
+        assert_eq!(cli.size, (800, 600));
+        assert!(parse(&["meshtui", "m.ply", "--size", "0x10"]).is_err());
+        assert!(parse(&["meshtui", "m.ply", "--size", "9999x10"]).is_err());
+        assert!(parse(&["meshtui", "m.ply", "--size", "bad"]).is_err());
+    }
+
+    #[test]
+    fn info_subcommand_parses_with_json_flag() {
+        let cli = parse(&["meshtui", "info", "a.ply", "b_dir", "--json"]).unwrap();
+        match cli.command {
+            Some(Commands::Info { meshes, json }) => {
+                assert_eq!(meshes, [PathBuf::from("a.ply"), PathBuf::from("b_dir")]);
+                assert!(json);
+            }
+            None => panic!("info must parse as a subcommand, not a mesh path"),
+        }
+    }
+
+    #[test]
+    fn empty_invocation_is_rejected() {
+        let cli = parse(&["meshtui"]).unwrap();
+        assert!(validate_cli(&cli).is_err());
+    }
+
+    #[test]
+    fn write_default_config_path_is_optional() {
+        let cli = parse(&["meshtui", "--write-default-config"]).unwrap();
+        assert_eq!(cli.write_default_config, Some(PathBuf::new()));
+        let cli = parse(&["meshtui", "--write-default-config", "/tmp/x.toml"]).unwrap();
+        assert_eq!(cli.write_default_config, Some(PathBuf::from("/tmp/x.toml")));
+    }
+
+    #[test]
+    fn human_info_renders_meshlab_style_fields() {
+        let mut mesh = meshtui_core::Mesh::new("tri");
+        mesh.positions = vec![glam::Vec3::ZERO, glam::Vec3::X, glam::Vec3::Y];
+        mesh.indices = vec![0, 1, 2];
+        let entry = MeshEntry {
+            source: PathBuf::from("tri.ply"),
+            format: "ply".into(),
+            info: MeshInfo::from_mesh(&mesh),
+        };
+        let totals = InfoTotals {
+            meshes: 1,
+            vertices: 3,
+            faces: 1,
+            surface_area: 0.5,
+            signed_volume: 0.0,
+        };
+        // Must not panic; the JSON must carry the MeshLab-style fields.
+        print_human_info(std::slice::from_ref(&entry), &totals);
+        let json = serde_json::to_string(&InfoReport {
+            meshes: vec![entry],
+            totals,
+        })
+        .unwrap();
+        assert!(json.contains("\"vertices\":3"));
+        assert!(json.contains("\"edges\":3"));
+        assert!(json.contains("\"diagonal\""));
     }
 }
