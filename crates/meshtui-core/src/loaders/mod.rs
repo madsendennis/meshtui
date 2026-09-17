@@ -28,6 +28,59 @@ pub enum LoadError {
     },
     #[error("empty mesh file {0}")]
     Empty(PathBuf),
+    #[error("no supported meshes (*.ply, *.stl, *.obj, *.drc, *.glb) in {0}")]
+    NoMeshes(PathBuf),
+}
+
+/// Extensions recognized by the loaders, lower-case.
+pub const SUPPORTED_EXTENSIONS: &[&str] = &["stl", "obj", "ply", "drc", "glb"];
+
+/// Like [`load_path`], but each mesh carries the file it was loaded from
+/// (one input file can hold several meshes, e.g. multi-object OBJ).
+pub fn load_path_detailed(path: &Path) -> Result<Vec<(PathBuf, Mesh)>, LoadError> {
+    if !path.is_dir() {
+        return Ok(load_meshes(path)?
+            .into_iter()
+            .map(|mesh| (path.to_path_buf(), mesh))
+            .collect());
+    }
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(path).map_err(|e| LoadError::Io(path.to_path_buf(), e))? {
+        let entry = entry.map_err(|e| LoadError::Io(path.to_path_buf(), e))?;
+        let entry_path = entry.path();
+        if entry_path.is_file()
+            && entry_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| SUPPORTED_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+                .unwrap_or(false)
+        {
+            entries.push(entry_path);
+        }
+    }
+    entries.sort();
+    let mut meshes = Vec::new();
+    for entry_path in &entries {
+        meshes.extend(
+            load_meshes(entry_path)?
+                .into_iter()
+                .map(|mesh| (entry_path.clone(), mesh)),
+        );
+    }
+    if meshes.is_empty() {
+        return Err(LoadError::NoMeshes(path.to_path_buf()));
+    }
+    Ok(meshes)
+}
+
+/// Load a single mesh file, or every supported mesh inside a directory
+/// (sorted, non-recursive). Shared by the CLI and the interactive `open`
+/// prompt so both behave identically.
+pub fn load_path(path: &Path) -> Result<Vec<Mesh>, LoadError> {
+    Ok(load_path_detailed(path)?
+        .into_iter()
+        .map(|(_, mesh)| mesh)
+        .collect())
 }
 
 impl LoadError {

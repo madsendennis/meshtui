@@ -16,7 +16,8 @@ use regex::RegexBuilder;
 
 use meshtui_core::camera::ViewAxis;
 use meshtui_core::config::Config;
-use meshtui_core::{Camera, CameraKind, Scene};
+use meshtui_core::loaders::load_path;
+use meshtui_core::{Camera, CameraKind, Mesh, Scene};
 use meshtui_render::software::{camera_light_offset, Lighting, Options, SoftwareRasterizer};
 use meshtui_render::{Frame, RenderBackend};
 use meshtui_term::{
@@ -50,6 +51,18 @@ enum Modal {
         input: String,
         error: Option<String>,
     },
+    OpenPath {
+        input: String,
+        error: Option<String>,
+    },
+}
+
+/// Meshes removed by `mesh_delete`, restorable LIFO via `mesh_undo_delete`.
+struct DeletedMeshes {
+    /// (original scene index, mesh), ascending by index.
+    entries: Vec<(usize, Mesh)>,
+    /// Marks (original indices) that sat on the removed meshes.
+    marked: BTreeSet<usize>,
 }
 
 struct AnimationState {
@@ -70,6 +83,7 @@ pub struct App {
     marked: BTreeSet<usize>,
     mesh_filter: String,
     filtered_indices: Vec<usize>,
+    deleted: Vec<DeletedMeshes>,
     show_sidepanel: bool,
     show_scene_info: bool,
     modal: Option<Modal>,
@@ -167,6 +181,7 @@ impl App {
             marked: BTreeSet::new(),
             mesh_filter: String::new(),
             filtered_indices,
+            deleted: Vec::new(),
             show_sidepanel: true,
             show_scene_info,
             modal: None,
@@ -417,6 +432,37 @@ impl App {
                 ));
                 rerender = false;
             }
+            "mesh_open" => {
+                self.modal = Some(Modal::OpenPath {
+                    input: String::new(),
+                    error: None,
+                });
+                rerender = false;
+            }
+            "mesh_delete" => {
+                let count = self.delete_targets();
+                self.status_message = Some(if count == 0 {
+                    "nothing to delete".into()
+                } else {
+                    let undo_key = key_label(
+                        &self
+                            .config
+                            .key("mesh_undo_delete")
+                            .unwrap_or_else(|| "-".into()),
+                    );
+                    format!("deleted {count} mesh(es) ({undo_key} to restore)")
+                });
+                rerender = false;
+            }
+            "mesh_undo_delete" => {
+                let count = self.restore_deleted();
+                self.status_message = Some(if count == 0 {
+                    "nothing to restore".into()
+                } else {
+                    format!("restored {count} mesh(es)")
+                });
+                rerender = false;
+            }
             "animation_start" => {
                 self.modal = Some(Modal::AnimationDelay {
                     input: String::new(),
@@ -574,6 +620,35 @@ impl App {
                 },
                 "backspace" => {
                     input.pop();
+                    *error = None;
+                }
+                _ => {
+                    if let Some(ch) = input_char(key) {
+                        input.push(ch);
+                        *error = None;
+                    }
+                }
+            },
+            Modal::OpenPath { input, error } => match key {
+                "escape" => keep_open = false,
+                "enter" => {
+                    let path = expand_home(input.trim());
+                    match load_path(std::path::Path::new(&path)) {
+                        Ok(meshes) => {
+                            let count = self.add_meshes(meshes);
+                            self.status_message = Some(format!("added {count} mesh(es)"));
+                            keep_open = false;
+                        }
+                        Err(load_error) => *error = Some(load_error.to_string()),
+                    }
+                }
+                "backspace" => {
+                    input.pop();
+                    *error = None;
+                }
+                "tab" => {
+                    let (completed, _) = complete_path(input);
+                    *input = completed;
                     *error = None;
                 }
                 _ => {
@@ -766,6 +841,103 @@ impl App {
         let count = self.marked.len();
         self.marked.clear();
         self.status_message = Some(format!("cleared {count} selected mesh(es)"));
+    }
+
+    /// Remove the selected/marked meshes from the scene, keeping them on the
+    /// undo stack. Returns how many were deleted.
+    fn delete_targets(&mut self) -> usize {
+        let mut targets = self.target_indices();
+        targets.sort_unstable();
+        targets.dedup();
+        if targets.is_empty() {
+            return 0;
+        }
+        let selected_deleted = targets.contains(&self.selected);
+        let mut entries = Vec::with_capacity(targets.len());
+        let mut marked = BTreeSet::new();
+        for &index in targets.iter().rev() {
+            let mesh = self.scene.meshes.remove(index);
+            if self.marked.remove(&index) {
+                marked.insert(index);
+            }
+            entries.push((index, mesh));
+        }
+        entries.reverse();
+        // Shift the surviving marks down past the removed indices.
+        self.marked = self
+            .marked
+            .iter()
+            .map(|&m| m - targets.iter().filter(|&&t| t < m).count())
+            .collect();
+        if !selected_deleted {
+            self.selected -= targets.iter().filter(|&&t| t < self.selected).count();
+        }
+        let count = entries.len();
+        if self.deleted.len() >= 32 {
+            self.deleted.remove(0);
+        }
+        self.deleted.push(DeletedMeshes { entries, marked });
+        let filter = self.mesh_filter.clone();
+        self.set_mesh_filter(&filter)
+            .expect("the active filter stays valid");
+        if selected_deleted {
+            self.selected = self.filtered_indices.first().copied().unwrap_or(0);
+        }
+        self.frame_visible_meshes();
+        self.render_dirty = true;
+        count
+    }
+
+    /// Restore the most recently deleted meshes (LIFO). Returns how many
+    /// came back.
+    fn restore_deleted(&mut self) -> usize {
+        let Some(entry) = self.deleted.pop() else {
+            return 0;
+        };
+        let count = entry.entries.len();
+        let mut first_restored = None;
+        for (index, mesh) in entry.entries {
+            let at = index.min(self.scene.meshes.len());
+            self.scene.meshes.insert(at, mesh);
+            // Marks at/after the insertion point shift up.
+            self.marked = self
+                .marked
+                .iter()
+                .map(|&m| if m >= at { m + 1 } else { m })
+                .collect();
+            if first_restored.is_none() {
+                first_restored = Some(at);
+            }
+        }
+        // Reinsertion at the original indices makes the stored marks valid.
+        self.marked.extend(entry.marked);
+        if let Some(at) = first_restored {
+            self.selected = at;
+        }
+        let filter = self.mesh_filter.clone();
+        self.set_mesh_filter(&filter)
+            .expect("the active filter stays valid");
+        self.frame_visible_meshes();
+        self.render_dirty = true;
+        count
+    }
+
+    /// Append loaded meshes to the scene, re-apply the filter, and reframe.
+    /// Returns how many were added.
+    fn add_meshes(&mut self, meshes: Vec<Mesh>) -> usize {
+        let first_new = self.scene.meshes.len();
+        let count = meshes.len();
+        if count == 0 {
+            return 0;
+        }
+        self.scene.meshes.extend(meshes);
+        self.selected = first_new;
+        let filter = self.mesh_filter.clone();
+        self.set_mesh_filter(&filter)
+            .expect("the active filter stays valid");
+        self.frame_visible_meshes();
+        self.render_dirty = true;
+        count
     }
 
     fn move_selection(&mut self, dir: i32) {
@@ -1070,6 +1242,9 @@ impl App {
                 input,
                 error.as_deref(),
             ),
+            Modal::OpenPath { input, error } => {
+                draw_open_modal(f, self.theme, input, error.as_deref())
+            }
         }
     }
 }
@@ -1317,6 +1492,113 @@ fn input_char(key: &str) -> Option<char> {
     let mut chars = key.chars();
     let ch = chars.next()?;
     chars.next().is_none().then_some(ch)
+}
+
+/// Expand a leading `~` to the user's home directory.
+fn expand_home(input: &str) -> String {
+    if input == "~" || input.starts_with("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return format!("{}{}", home.display(), &input[1..]);
+        }
+    }
+    input.to_string()
+}
+
+/// Tab-complete the last path component against the filesystem. Returns the
+/// (possibly extended) input and the current match names (directories get a
+/// trailing `/`) so the modal can show them.
+fn complete_path(input: &str) -> (String, Vec<String>) {
+    let expanded = expand_home(input);
+    let (dir_part, prefix) = match expanded.rfind('/') {
+        Some(pos) => (&expanded[..=pos], &expanded[pos + 1..]),
+        None => ("", expanded.as_str()),
+    };
+    let read_dir = if dir_part.is_empty() { "." } else { dir_part };
+    let mut matches: Vec<String> = std::fs::read_dir(read_dir)
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .filter_map(|entry| {
+                    let name = entry.file_name().into_string().ok()?;
+                    let hidden = name.starts_with('.') && !prefix.starts_with('.');
+                    if hidden || !name.starts_with(prefix) {
+                        return None;
+                    }
+                    let suffix = if entry.path().is_dir() { "/" } else { "" };
+                    Some(format!("{name}{suffix}"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    matches.sort();
+    if matches.is_empty() {
+        return (expanded, matches);
+    }
+    // Extend the prefix to the longest common prefix of all matches.
+    let mut lcp = matches[0].clone();
+    for name in &matches[1..] {
+        let keep = lcp
+            .chars()
+            .zip(name.chars())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let byte = lcp.char_indices().nth(keep).map_or(lcp.len(), |(i, _)| i);
+        lcp.truncate(byte);
+    }
+    (format!("{dir_part}{lcp}"), matches)
+}
+
+fn draw_open_modal(f: &mut TuiFrame, theme: Theme, input: &str, error: Option<&str>) {
+    let (_, matches) = complete_path(input);
+    let shown: Vec<&str> = matches.iter().take(5).map(String::as_str).collect();
+    let height = 8 + shown.len() as u16;
+    let area = centered_rect_cells(64, height.min(f.area().height.saturating_sub(2)), f.area());
+    let base_style = Style::default().fg(theme.foreground).bg(theme.background);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(" Add Meshes ")
+        .border_style(Style::default().fg(theme.accent))
+        .style(base_style);
+    let inner = block.inner(area);
+    f.render_widget(Clear, area);
+    f.render_widget(block, area);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Length(shown.len() as u16),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+    f.render_widget(
+        Paragraph::new("Mesh file or directory (Tab completes, ~ expands)").style(base_style),
+        chunks[0],
+    );
+    f.render_widget(
+        Paragraph::new(format!(" {input}█"))
+            .block(Block::default().borders(Borders::ALL))
+            .style(base_style),
+        chunks[1],
+    );
+    if !shown.is_empty() {
+        let lines: Vec<Line> = shown.iter().map(|m| Line::from(format!(" {m}"))).collect();
+        f.render_widget(
+            Paragraph::new(lines).style(Style::default().fg(theme.muted).bg(theme.background)),
+            chunks[2],
+        );
+    }
+    let footer = error.unwrap_or("Enter load | Tab complete | Esc cancel");
+    let footer_color = if error.is_some() {
+        TColor::Red
+    } else {
+        theme.muted
+    };
+    f.render_widget(
+        Paragraph::new(footer).style(Style::default().fg(footer_color).bg(theme.background)),
+        chunks[3],
+    );
 }
 
 /// Run the event-driven TUI.
@@ -1625,6 +1907,191 @@ mod tests {
     }
 
     #[test]
+    fn delete_removes_selected_mesh_and_undo_restores_it() {
+        let mut app = app_with_meshes(&["beta", "alpha", "alpine"]);
+        assert_eq!(app.selected, 1, "alphabetical first is alpha");
+        app.execute_action("mesh_delete");
+        assert_eq!(app.scene.meshes.len(), 2);
+        assert!(!app.scene.meshes.iter().any(|mesh| mesh.name == "alpha"));
+        // Selection moved to the first remaining (alphabetical) mesh.
+        assert_eq!(app.scene.meshes[app.selected].name, "alpine");
+
+        app.execute_action("mesh_undo_delete");
+        assert_eq!(app.scene.meshes.len(), 3);
+        assert_eq!(
+            app.scene.meshes[app.selected].name, "alpha",
+            "undo selects the first restored mesh"
+        );
+    }
+
+    #[test]
+    fn delete_remaps_marks_and_undo_restores_them() {
+        let mut app = app_with_meshes(&["beta", "alpha", "alpine", "zeta"]);
+        // Mark beta (0) and alpine (2): delete removes the marked meshes.
+        app.marked = [0, 2].into_iter().collect();
+        app.execute_action("mesh_delete");
+        assert_eq!(
+            app.scene
+                .meshes
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "zeta"]
+        );
+        assert!(app.marked.is_empty(), "deleted marks leave the active set");
+
+        app.execute_action("mesh_undo_delete");
+        assert_eq!(
+            app.scene
+                .meshes
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>(),
+            ["beta", "alpha", "alpine", "zeta"],
+            "undo reinserts meshes at their original positions"
+        );
+        assert_eq!(app.marked, [0, 2].into_iter().collect());
+    }
+
+    #[test]
+    fn delete_shifts_marks_outside_the_delete_scope() {
+        let mut app = app_with_meshes(&["beta", "alpha", "alpine", "zeta"]);
+        app.set_mesh_filter("alp").unwrap(); // in scope: alpha (1), alpine (2)
+        app.marked = [3].into_iter().collect(); // zeta, outside the filter scope
+        app.execute_action("mesh_delete"); // deletes the selected alpha (1)
+        assert_eq!(
+            app.scene
+                .meshes
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>(),
+            ["beta", "alpine", "zeta"]
+        );
+        assert_eq!(
+            app.marked,
+            [2].into_iter().collect(),
+            "zeta's mark shifts down past the removed index"
+        );
+        assert_eq!(app.scene.meshes[app.selected].name, "alpine");
+
+        app.execute_action("mesh_undo_delete");
+        assert_eq!(
+            app.scene
+                .meshes
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>(),
+            ["beta", "alpha", "alpine", "zeta"]
+        );
+        assert_eq!(app.marked, [3].into_iter().collect());
+    }
+
+    #[test]
+    fn delete_respects_the_active_filter() {
+        let mut app = app_with_meshes(&["beta", "alpha", "alpine"]);
+        app.set_mesh_filter("alp").unwrap();
+        app.execute_action("mesh_select_all");
+        app.execute_action("mesh_delete");
+        assert_eq!(app.scene.meshes.len(), 1);
+        assert_eq!(
+            app.scene.meshes[0].name, "beta",
+            "filtered-out beta survives"
+        );
+        assert!(
+            app.mesh_indices().is_empty(),
+            "the surviving beta does not match the active filter"
+        );
+        app.execute_action("mesh_clear_filter");
+        assert_eq!(app.mesh_indices(), &[0]);
+    }
+
+    #[test]
+    fn deleting_everything_leaves_a_usable_empty_scene() {
+        let mut app = app_with_meshes(&["mesh"]);
+        app.execute_action("mesh_delete");
+        assert!(app.scene.meshes.is_empty());
+        assert!(app.mesh_indices().is_empty());
+        assert!(
+            app.render_frame(64, 32).is_none(),
+            "empty scene renders None"
+        );
+        app.execute_action("mesh_undo_delete");
+        assert_eq!(app.scene.meshes.len(), 1);
+    }
+
+    #[test]
+    fn add_meshes_appends_selects_and_respects_filter() {
+        let mut app = app_with_meshes(&["beta"]);
+        let added = app.add_meshes(vec![
+            triangle_at("alpha", Vec3::ZERO, 1.0),
+            triangle_at("gamma", Vec3::ZERO, 1.0),
+        ]);
+        assert_eq!(added, 2);
+        assert_eq!(app.scene.meshes.len(), 3);
+        assert_eq!(
+            app.scene.meshes[app.selected].name, "alpha",
+            "selection jumps to the first added mesh"
+        );
+
+        // With a filter active, added meshes appear only when they match.
+        let mut app = app_with_meshes(&["beta"]);
+        app.set_mesh_filter("zzz").unwrap();
+        assert!(app.mesh_indices().is_empty());
+        app.add_meshes(vec![triangle_at("zzz_mesh", Vec3::ZERO, 1.0)]);
+        assert_eq!(app.mesh_indices().len(), 1);
+        assert_eq!(app.scene.meshes[app.selected].name, "zzz_mesh");
+    }
+
+    #[test]
+    fn path_completion_expands_and_matches() {
+        let dir = std::env::temp_dir().join(format!("meshtui_test_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("subdir")).unwrap();
+        std::fs::write(dir.join("alpha.ply"), b"").unwrap();
+        std::fs::write(dir.join("alpine.obj"), b"").unwrap();
+        let base = dir.display().to_string();
+
+        // Tilde expansion.
+        let home = dirs::home_dir().unwrap();
+        let (expanded, _) = complete_path("~/");
+        assert_eq!(expanded, format!("{}/", home.display()));
+
+        // Unique directory component completes with a trailing slash.
+        let (completed, matches) = complete_path(&format!("{base}/sub"));
+        assert_eq!(completed, format!("{base}/subdir/"));
+        assert_eq!(matches, vec!["subdir/".to_string()]);
+
+        // Ambiguous prefix completes to the longest common prefix.
+        let (completed, matches) = complete_path(&format!("{base}/al"));
+        assert_eq!(completed, format!("{base}/alp"));
+        assert_eq!(matches.len(), 2);
+        let (completed, _) = complete_path(&format!("{base}/alpi"));
+        assert_eq!(completed, format!("{base}/alpine.obj"));
+
+        // Missing directory: input unchanged, no matches.
+        let (completed, matches) = complete_path(&format!("{base}/nope/x"));
+        assert_eq!(completed, format!("{base}/nope/x"));
+        assert!(matches.is_empty());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn open_modal_loads_meshes_from_disk() {
+        let testdata = concat!(env!("CARGO_MANIFEST_DIR"), "/../meshtui-core/testdata");
+        if !std::path::Path::new(testdata).is_dir() {
+            return; // testdata not generated in this checkout
+        }
+        let mut app = app_with_meshes(&["existing"]);
+        app.modal = Some(Modal::OpenPath {
+            input: testdata.to_string(),
+            error: None,
+        });
+        assert!(!app.handle_key("enter"));
+        assert!(app.modal.is_none(), "modal closed after successful load");
+        assert!(app.scene.meshes.len() > 1, "directory meshes were added");
+    }
+
+    #[test]
     fn palette_runs_selected_command() {
         let mut app = app_with_meshes(&["mesh"]);
         app.modal = Some(Modal::CommandPalette {
@@ -1864,6 +2331,10 @@ mod tests {
             },
             Modal::AnimationDirection { interval_ms: 100 },
             Modal::MeshFilter {
+                input: String::new(),
+                error: None,
+            },
+            Modal::OpenPath {
                 input: String::new(),
                 error: None,
             },

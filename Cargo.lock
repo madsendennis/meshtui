@@ -1199,6 +1199,7 @@ dependencies = [
  "anyhow",
  "criterion",
  "crossterm",
+ "dirs",
  "glam",
  "image",
  "meshtui-core",

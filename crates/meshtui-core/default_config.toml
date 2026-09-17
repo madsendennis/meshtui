@@ -171,6 +171,9 @@ mesh_select_all = "ctrl+a"             # Select all meshes matching the current 
 mesh_select_none = "ctrl+n"            # Clear the mesh selection
 mesh_filter = "/"
 mesh_clear_filter = "F"                # Clear the mesh-name filter
+mesh_open = "o"                        # Add meshes to the running scene
+mesh_delete = "d"                      # Delete selected/marked meshes from the scene
+mesh_undo_delete = "ctrl+z"            # Restore the most recently deleted meshes
 
 # Animation controls
 animation_start = "a"

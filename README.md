@@ -104,6 +104,18 @@ The side panel always shows the active selection controls:
 | `c` / `C` | Cycle selected mesh colors |
 | `x` | Set a custom color |
 
+## Editing the open scene
+
+| Key | Action |
+|-----|--------|
+| `o` | Add meshes to the scene (file or directory, Tab completes paths) |
+| `d` | Delete the selected meshes from the scene |
+| `Ctrl+Z` | Restore the most recently deleted meshes |
+
+Deleting applies to the marked meshes, or the active row when nothing is
+marked — the same scoping as hide/show. Deleted meshes stay on an undo stack
+(32 levels) instead of asking for confirmation.
+
 A normal filter is a case-insensitive substring. Prefix with `re:` for a
 case-insensitive regular expression, or `!` to invert:
 

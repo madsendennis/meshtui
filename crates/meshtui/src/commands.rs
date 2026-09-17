@@ -180,6 +180,21 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         section: "Meshes",
+        action: "mesh_open",
+        description: "Add meshes to the scene",
+    },
+    CommandSpec {
+        section: "Meshes",
+        action: "mesh_delete",
+        description: "Delete selected or marked meshes",
+    },
+    CommandSpec {
+        section: "Meshes",
+        action: "mesh_undo_delete",
+        description: "Restore deleted meshes",
+    },
+    CommandSpec {
+        section: "Meshes",
         action: "mesh_hide",
         description: "Hide selected or marked meshes",
     },
