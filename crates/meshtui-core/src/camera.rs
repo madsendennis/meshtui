@@ -396,7 +396,9 @@ fn orthonormal_basis(up: Vec3) -> (Vec3, Vec3) {
 
 /// Orientation quaternion for a camera whose target→camera direction is
 /// `back`, rolled so screen up matches `up` (projected onto the view plane).
-fn look_rotation(back: Vec3, up: Vec3) -> Quat {
+/// Public so headless tooling (e.g. multi-view screenshots) can pose the
+/// camera with the same math the interactive viewer uses.
+pub fn look_rotation(back: Vec3, up: Vec3) -> Quat {
     let z = back.normalize_or(Vec3::Z);
     let f = -z;
     let s = f.cross(up);

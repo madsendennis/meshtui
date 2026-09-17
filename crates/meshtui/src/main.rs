@@ -21,7 +21,6 @@ use serde::Serialize;
 use meshtui_core::config::{self, Config};
 use meshtui_core::loaders::{load_path, load_path_detailed};
 use meshtui_core::{MeshInfo, Scene, ViewAxis};
-
 const LONG_ABOUT: &str = "\
 Terminal 3D mesh viewer using the Kitty graphics protocol.
 
@@ -88,6 +87,50 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Render one mesh from several viewpoints to numbered PNGs
+    Screenshot {
+        /// Mesh file or directory
+        #[arg(value_name = "MESH", required = true)]
+        mesh: PathBuf,
+
+        /// Extra TOML config merged over the user config
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+
+        /// Viewpoint set: "all" (6 axis views), "iso" (4 diagonal views),
+        /// or "ring:N" (N angles around the up axis, 2..=64)
+        #[arg(long, default_value = "all", value_parser = parse_view_set)]
+        views: ViewSet,
+
+        /// Write files into DIR (created; default: meshtui_views_<timestamp>)
+        #[arg(long, value_name = "DIR")]
+        out_dir: Option<PathBuf>,
+
+        /// Common output name prefix (default: input file stem)
+        #[arg(long, value_name = "PREFIX")]
+        prefix: Option<String>,
+
+        /// Screenshot size, WxH (1..=4096 per side)
+        #[arg(long, default_value = "1600x1200", value_parser = parse_size)]
+        size: (u32, u32),
+    },
+}
+
+/// One planned view: the output file suffix plus the camera direction
+/// (target→camera offset). `dir: None` inherits the default pose instead of
+/// overriding it.
+#[derive(Debug, Clone)]
+struct ViewSpec {
+    suffix: String,
+    dir: Option<glam::Vec3>,
+}
+
+/// Which viewpoint set `--views` selects.
+#[derive(Debug, Clone)]
+enum ViewSet {
+    All,
+    Iso,
+    Ring(u32),
 }
 
 fn parse_size(s: &str) -> Result<(u32, u32), String> {
@@ -104,6 +147,80 @@ fn parse_size(s: &str) -> Result<(u32, u32), String> {
 
 fn parse_view(s: &str) -> Result<ViewAxis, String> {
     ViewAxis::parse(s).ok_or("--view must be one of +x, -x, +y, -y, +z, -z".into())
+}
+
+fn parse_view_set(s: &str) -> Result<ViewSet, String> {
+    match s {
+        "all" => Ok(ViewSet::All),
+        "iso" => Ok(ViewSet::Iso),
+        other => {
+            let count = other
+                .strip_prefix("ring:")
+                .and_then(|n| n.parse::<u32>().ok())
+                .filter(|n| (2..=64).contains(n))
+                .ok_or("--views must be all, iso, or ring:N with N in 2..=64")?;
+            Ok(ViewSet::Ring(count))
+        }
+    }
+}
+
+/// Camera back direction for a ring at 30° elevation around `up`, using the
+/// same basis math as the spherical orbit.
+fn ring_direction(i: u32, n: u32, up: glam::Vec3) -> glam::Vec3 {
+    use std::f32::consts::{FRAC_PI_6, TAU};
+    let up = up.normalize_or(glam::Vec3::Y);
+    let helper = if up.y.abs() > 0.99 {
+        glam::Vec3::X
+    } else {
+        glam::Vec3::Y
+    };
+    let right = up.cross(helper).normalize_or(glam::Vec3::X);
+    let fwd = right.cross(up).normalize_or(glam::Vec3::Z);
+    let theta = i as f32 / n as f32 * TAU;
+    let (sin_e, cos_e) = FRAC_PI_6.sin_cos();
+    right * (cos_e * theta.cos()) + fwd * (cos_e * theta.sin()) + up * sin_e
+}
+
+/// Expand the selected set into concrete view plans. Ring and iso names are
+/// zero-padded so files sort in view order.
+fn view_specs(set: &ViewSet, up: glam::Vec3) -> Vec<ViewSpec> {
+    match set {
+        ViewSet::All => [
+            (ViewAxis::PosX, "plus_x"),
+            (ViewAxis::NegX, "minus_x"),
+            (ViewAxis::PosY, "plus_y"),
+            (ViewAxis::NegY, "minus_y"),
+            (ViewAxis::PosZ, "plus_z"),
+            (ViewAxis::NegZ, "minus_z"),
+        ]
+        .into_iter()
+        .map(|(axis, suffix)| ViewSpec {
+            suffix: suffix.into(),
+            dir: Some(axis.direction().normalize()),
+        })
+        .collect(),
+        ViewSet::Iso => [
+            (glam::Vec3::new(1.0, 1.0, 1.0), "iso_0"),
+            (glam::Vec3::new(-1.0, 1.0, 1.0), "iso_1"),
+            (glam::Vec3::new(1.0, 1.0, -1.0), "iso_2"),
+            (glam::Vec3::new(-1.0, 1.0, -1.0), "iso_3"),
+        ]
+        .into_iter()
+        .map(|(dir, suffix)| ViewSpec {
+            suffix: suffix.into(),
+            dir: Some(dir.normalize()),
+        })
+        .collect(),
+        ViewSet::Ring(n) => {
+            let width = (n - 1).to_string().len();
+            (0..*n)
+                .map(|i| ViewSpec {
+                    suffix: format!("ring_{i:0width$}"),
+                    dir: Some(ring_direction(i, *n, up)),
+                })
+                .collect()
+        }
+    }
 }
 
 /// clap's built-in PathBuf parser rejects the empty `default_missing_value`
@@ -267,11 +384,94 @@ fn print_human_info(entries: &[MeshEntry], totals: &InfoTotals) {
     }
 }
 
+/// `meshtui screenshot`: render one mesh from several viewpoints into
+/// numbered PNGs. The axis/iso/ring poses come from the same basis math as
+/// the interactive camera, so headless frames match the TUI.
+fn run_screenshot(
+    mesh_path: &std::path::Path,
+    config_path: Option<&std::path::Path>,
+    set: &ViewSet,
+    out_dir: Option<&std::path::Path>,
+    prefix: Option<&str>,
+    size: (u32, u32),
+) -> Result<(), String> {
+    let meshes = load_path(mesh_path).map_err(|e| e.to_string())?;
+    let mut scene = Scene::new();
+    scene.meshes.extend(meshes);
+    if scene.meshes.is_empty() {
+        return Err("no geometry loaded".into());
+    }
+    let config = Config::load_effective(config_path).map_err(|e| e.to_string())?;
+    let up = glam::Vec3::from(config.view.up_vectors[0]);
+
+    let mut app = app::App::new(scene, config);
+    app.set_aspect(size.0 as f32 / size.1 as f32);
+
+    let prefix = prefix.map(String::from).unwrap_or_else(|| {
+        mesh_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("mesh")
+            .to_string()
+    });
+    let dir = match out_dir {
+        Some(dir) => dir.to_path_buf(),
+        None => {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            std::env::current_dir()
+                .map_err(|e| e.to_string())?
+                .join(format!("meshtui_views_{ts}"))
+        }
+    };
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+
+    for spec in view_specs(set, up) {
+        if let Some(dir_vec) = spec.dir {
+            let up = if dir_vec.dot(app.camera.up()).abs() > 0.99 {
+                // View along the up axis: pick any perpendicular up.
+                if dir_vec.dot(glam::Vec3::Y).abs() > 0.99 {
+                    glam::Vec3::Z
+                } else {
+                    glam::Vec3::Y
+                }
+            } else {
+                app.camera.up()
+            };
+            app.camera.orientation = meshtui_core::camera::look_rotation(dir_vec, up);
+        }
+        let path = dir.join(format!("{prefix}_{}.png", spec.suffix));
+        app::save_screenshot(&mut app, &path, size.0, size.1).map_err(|e| e.to_string())?;
+        println!("{}", path.display());
+    }
+    Ok(())
+}
+
 fn run(cli: Cli) -> Result<(), String> {
     validate_cli(&cli)?;
 
-    if let Some(Commands::Info { meshes, json }) = &cli.command {
-        return run_info(meshes, *json);
+    match &cli.command {
+        Some(Commands::Info { meshes, json }) => return run_info(meshes, *json),
+        Some(Commands::Screenshot {
+            mesh,
+            config,
+            views,
+            out_dir,
+            prefix,
+            size,
+        }) => {
+            return run_screenshot(
+                mesh,
+                config.as_deref(),
+                views,
+                out_dir.as_deref(),
+                prefix.as_deref(),
+                *size,
+            );
+        }
+        None => {}
     }
 
     // Config-only commands run without meshes.
@@ -425,7 +625,42 @@ mod tests {
                 assert_eq!(meshes, [PathBuf::from("a.ply"), PathBuf::from("b_dir")]);
                 assert!(json);
             }
-            None => panic!("info must parse as a subcommand, not a mesh path"),
+            other => panic!("info must parse as a subcommand, not {other:?}"),
+        }
+    }
+
+    #[test]
+    fn screenshot_subcommand_parses_with_view_flags() {
+        let cli = parse(&[
+            "meshtui",
+            "screenshot",
+            "m.ply",
+            "--views",
+            "ring:8",
+            "--out-dir",
+            "/tmp/shots",
+            "--prefix",
+            "gear",
+            "--size",
+            "800x600",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::Screenshot {
+                mesh,
+                views,
+                out_dir,
+                prefix,
+                size,
+                ..
+            }) => {
+                assert_eq!(mesh, PathBuf::from("m.ply"));
+                assert!(matches!(views, ViewSet::Ring(8)));
+                assert_eq!(out_dir, Some(PathBuf::from("/tmp/shots")));
+                assert_eq!(prefix.as_deref(), Some("gear"));
+                assert_eq!(size, (800, 600));
+            }
+            other => panic!("screenshot must parse as a subcommand, not {other:?}"),
         }
     }
 
@@ -441,6 +676,77 @@ mod tests {
         assert_eq!(cli.write_default_config, Some(PathBuf::new()));
         let cli = parse(&["meshtui", "--write-default-config", "/tmp/x.toml"]).unwrap();
         assert_eq!(cli.write_default_config, Some(PathBuf::from("/tmp/x.toml")));
+    }
+
+    #[test]
+    fn view_set_parses_all_iso_ring() {
+        assert!(matches!(parse_view_set("all").unwrap(), ViewSet::All));
+        assert!(matches!(parse_view_set("iso").unwrap(), ViewSet::Iso));
+        assert!(matches!(
+            parse_view_set("ring:8").unwrap(),
+            ViewSet::Ring(8)
+        ));
+        assert!(parse_view_set("ring:1").is_err());
+        assert!(parse_view_set("ring:65").is_err());
+        assert!(parse_view_set("ring:x").is_err());
+        assert!(parse_view_set("front").is_err());
+    }
+
+    #[test]
+    fn view_specs_cover_the_axis_set() {
+        let specs = view_specs(&ViewSet::All, glam::Vec3::Y);
+        assert_eq!(specs.len(), 6);
+        let suffixes: Vec<&str> = specs.iter().map(|s| s.suffix.as_str()).collect();
+        assert_eq!(
+            suffixes,
+            ["plus_x", "minus_x", "plus_y", "minus_y", "plus_z", "minus_z"]
+        );
+        // Opposite axes are anti-parallel.
+        let dirs: Vec<glam::Vec3> = specs.iter().filter_map(|s| s.dir).collect();
+        assert!(dirs[0].dot(dirs[1]) < -0.99);
+    }
+
+    #[test]
+    fn ring_specs_are_evenly_spaced_at_elevation() {
+        let specs = view_specs(&ViewSet::Ring(8), glam::Vec3::Y);
+        assert_eq!(specs.len(), 8);
+        assert_eq!(specs[0].suffix, "ring_0");
+        let dirs: Vec<glam::Vec3> = specs.iter().filter_map(|s| s.dir).collect();
+        for dir in &dirs {
+            // 30° elevation: direction·up = sin(30°).
+            assert!(
+                (dir.dot(glam::Vec3::Y) - 0.5).abs() < 1e-5,
+                "ring stays at 30° elevation"
+            );
+            assert!((dir.length() - 1.0).abs() < 1e-5);
+        }
+        // Adjacent views are 45° apart in azimuth and the ring closes.
+        // Compare azimuth of the horizontal projection, not dot products of
+        // the tilted vectors; the step may run either way around the axis.
+        let azimuth = |d: glam::Vec3| d.z.atan2(d.x).rem_euclid(std::f32::consts::TAU);
+        let step = (azimuth(dirs[1]) - azimuth(dirs[0])).rem_euclid(std::f32::consts::TAU);
+        let expected = 45f32.to_radians();
+        assert!(
+            (step - expected).abs() < 1e-4
+                || (step + expected - std::f32::consts::TAU).abs() < 1e-4,
+            "45° azimuth step either way, got {}",
+            step.to_degrees()
+        );
+        let wrap = (azimuth(dirs[0]) + std::f32::consts::TAU - azimuth(dirs[7]))
+            .rem_euclid(std::f32::consts::TAU);
+        assert!(
+            (wrap - expected).abs() < 1e-4
+                || (wrap + expected - std::f32::consts::TAU).abs() < 1e-4,
+            "ring closes, got {}",
+            wrap.to_degrees()
+        );
+    }
+
+    #[test]
+    fn ring_specs_zero_pad_for_sort_order() {
+        let specs = view_specs(&ViewSet::Ring(12), glam::Vec3::Y);
+        assert_eq!(specs[1].suffix, "ring_01");
+        assert_eq!(specs[11].suffix, "ring_11");
     }
 
     #[test]

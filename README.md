@@ -72,6 +72,11 @@ meshtui model.ply --config config.toml
 # Print mesh statistics (MeshLab-style), human-readable or JSON
 meshtui info model.ply
 meshtui info ./models --json | jq '.totals'
+
+# Render one mesh from several viewpoints (6 axis views, 4 isometric
+# diagonals, or an N-step turntable ring) into numbered PNGs
+meshtui screenshot model.ply --views all --out-dir shots/
+meshtui screenshot model.ply --views ring:12 --prefix gear
 ```
 
 ## Configuration
