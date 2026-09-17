@@ -353,27 +353,32 @@ impl Camera {
         self.orientation = look_rotation(dir, up);
     }
 
-    /// Roll the camera so its up axis matches `new_up`, keeping the view
-    /// direction and position. No-op when looking along `new_up` (degenerate).
+    /// Re-orient the camera to a new world up axis. The whole orientation
+    /// rotates by the arc taking the current up to `new_up`, so the mesh
+    /// tumbles on screen (a Z-up part stands upright when cycling Y-up→Z-up),
+    /// not just the horizon rolling. Kept because the quaternion trackball
+    /// derives up from orientation; cycling up vectors is how the user says
+    /// "treat this axis as vertical".
     pub fn set_up(&mut self, new_up: Vec3) {
         let new_up = new_up.normalize_or(Vec3::Y);
-        let view_dir = -self.offset_dir();
-        if view_dir.dot(new_up).abs() > 0.999 {
-            return;
-        }
-        self.orientation = look_rotation(self.offset_dir(), new_up);
+        let current = self.up();
+        let delta = Quat::from_rotation_arc(current, new_up);
+        self.orientation = (delta * self.orientation).normalize();
     }
 
     pub fn cycle_up(&mut self, up_vectors: &[[f32; 3]], forward: bool) {
         if up_vectors.is_empty() {
             return;
         }
+        // Find the configured up vector closest to the camera's current up
+        // (a trackball orientation rarely matches exactly), then step.
+        let current = self.up();
         let idx = up_vectors
             .iter()
-            .position(|v| {
-                let v = Vec3::from(*v).normalize_or(Vec3::Y);
-                v.dot(self.up()) > 0.999
-            })
+            .map(|v| current.dot(Vec3::from(*v).normalize_or(Vec3::Y)))
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i)
             .unwrap_or(0);
         let n = up_vectors.len();
         let next = if forward {
@@ -501,12 +506,61 @@ mod tests {
     }
 
     #[test]
-    fn set_up_rolls_camera_but_keeps_position() {
+    fn set_up_reorients_world_up_but_keeps_distance() {
         let mut c = cam();
-        let pos = c.position();
+        let distance = c.distance;
+        let target = c.target;
         c.set_up(Vec3::X);
-        assert!((c.position() - pos).length() < 1e-5);
+        assert!(
+            (c.distance - distance).abs() < 1e-5,
+            "set_up must not change zoom"
+        );
+        assert_eq!(c.target, target, "set_up must not move the target");
         assert!(c.up().dot(Vec3::X) > 0.999, "up={:?}", c.up());
+    }
+
+    #[test]
+    fn set_up_rotates_the_view_direction_too() {
+        // Pose looking down -Z with up +Y (an unambiguous, non-degenerate
+        // pose), then switch to Z-up: the view direction must move.
+        let mut c = cam();
+        c.set_spherical(0.0, std::f32::consts::FRAC_PI_2, Vec3::Y);
+        let view_before = c.offset_dir();
+        c.set_up(Vec3::Z);
+        let view_after = c.offset_dir();
+        // Old behavior rolled around the view axis (direction unchanged);
+        // new behavior tumbles the world, so the direction must move.
+        assert!(
+            view_before.dot(view_after) < 0.999,
+            "re-orienting up should move the view direction: {view_before:?} → {view_after:?}"
+        );
+    }
+
+    #[test]
+    fn cycle_up_walks_configured_vectors_in_both_directions() {
+        let ups = [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let mut c = cam(); // default up +Y
+        c.cycle_up(&ups, true);
+        assert!(c.up().dot(Vec3::Z) > 0.999, "u: Y → Z, up={:?}", c.up());
+        c.cycle_up(&ups, true);
+        assert!(c.up().dot(Vec3::Y) > 0.999, "u: Z → Y, up={:?}", c.up());
+        c.cycle_up(&ups, false);
+        assert!(c.up().dot(Vec3::Z) > 0.999, "U: Y → Z, up={:?}", c.up());
+    }
+
+    #[test]
+    fn cycle_up_steps_from_a_tumbled_orientation() {
+        // Trackball-derived up rarely equals a configured axis exactly; the
+        // nearest-match step must still advance, not snap back to default.
+        let ups = [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let mut c = cam();
+        c.set_spherical(0.3, 1.1, Vec3::Z); // arbitrary tumble near Z-up
+        c.cycle_up(&ups, true);
+        assert!(
+            c.up().dot(Vec3::Y) > 0.99,
+            "from near-Z should step to Y, up={:?}",
+            c.up()
+        );
     }
 
     #[test]

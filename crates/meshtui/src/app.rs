@@ -2092,6 +2092,22 @@ mod tests {
     }
 
     #[test]
+    fn up_vector_cycle_reorients_and_reverses() {
+        // Default config has [Y-up, Z-up]; u/U must walk between them.
+        let mut app = app_with_meshes(&["mesh"]);
+        let up0 = app.camera.up();
+        app.execute_action("up_vector_next");
+        let up1 = app.camera.up();
+        assert_ne!(up0, up1, "u should change the up vector");
+        app.execute_action("up_vector_prev");
+        let up2 = app.camera.up();
+        assert!(
+            up0.dot(up2) > 0.999,
+            "U should return to the original up: {up0:?} vs {up2:?}"
+        );
+    }
+
+    #[test]
     fn palette_runs_selected_command() {
         let mut app = app_with_meshes(&["mesh"]);
         app.modal = Some(Modal::CommandPalette {
