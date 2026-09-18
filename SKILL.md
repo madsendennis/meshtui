@@ -1,109 +1,51 @@
 ---
 name: meshtui
 description: >-
-  Drive meshtui from the terminal to inspect, render, and animate 3D meshes
-  (PLY/STL/OBJ/DRC/GLB). Use when a task needs to see a mesh, check geometry,
-  or produce a PNG/GIF illustration without a GUI.
+  Inspect, render, and animate 3D meshes (PLY/STL/OBJ/DRC/GLB) from the
+  terminal — no GUI. Use when a task needs to see a mesh, check its geometry,
+  or produce a PNG/GIF illustration.
 ---
 
 # meshtui — terminal mesh viewer & renderer
 
-All subcommands run headless (no TTY needed) and exit 0 on success, 1 on
-error. Formats: `.ply .stl .obj .drc .glb`. A directory loads every supported
-mesh inside (sorted, non-recursive).
+`meshtui` runs fully headless (no display needed). Every interactive feature
+is reachable from the terminal, so you can look at a mesh, check its geometry,
+and produce images or animations without the TUI.
 
-## Quick reference
+**Exit codes: 0 = success, 1 = error. `--json` errors are JSON on stderr.**
 
-| Task | Command |
-|------|---------|
-| Mesh stats (verts/faces/edges/bbox/area/volume) | `meshtui info <mesh...>` |
-| Machine-readable stats | `meshtui info <mesh...> --json` |
-| Single render | `meshtui render <scene.yaml> -o out.png` |
-| Multi-view renders | `meshtui screenshot <mesh> --views all\|iso\|grid\|ring:N --out-dir DIR` |
-| One-PNG 6-view contact sheet | `meshtui screenshot <mesh> --views grid -o DIR` |
-| Animated GIF | `meshtui animate <cuts.yaml> -o out.gif` |
+## Discover the interface — don't memorize it
 
-## Full scene control (screenshot flags)
-
-Everything the TUI can do is a flag, so an agent sets up the whole scene:
+The tool is the source of truth and is always current. Explore it, don't
+guess flags:
 
 ```bash
-meshtui screenshot \
-  "gear=parts/gear.ply:color=#ff8000:alpha=0.9" \
-  "base.ply:color=gray:visible=true" \
-  --camera persp --azimuth 30 --elevation 20 --up 0,0,1 \
-  --fov 50 --zoom 0.9 --light 1.5 --wireframe 0 \
-  --background '#1a1b26' --views grid --size 1600x1000 --out-dir shots
+meshtui --capabilities          # machine-readable spec: formats, subcommands,
+                                # scene-file & animation keys (start here)
+meshtui <subcommand> --help     # authoritative flags for one subcommand
 ```
 
-- **Mesh spec** `[name=]path[:color=C][:alpha=A][:visible=B]` — per-mesh
-  color (palette name or `#RRGGBB[AA]`), opacity, visibility, and an optional
-  display name (used by animation cuts).
-- **Camera**: `--camera ortho|persp`, `--view +x|-x|+y|-y|+z|-z`, or
-  `--azimuth DEG --elevation DEG` around `--up X,Y,Z`; `--fov DEG`
-  (perspective), `--zoom FACTOR` (<1 in, >1 out), `--distance D`.
-- **Lighting/edges**: `--light 0..4`, `--wireframe PX` (0 = off).
-- **Output**: `--background #RRGGBB[AA]` (default transparent), `--size WxH`,
-  `--views all|iso|grid|ring:N`, `--out-dir DIR`, `--prefix NAME`.
+Subcommands: `info` (stats), `screenshot` (multi-view PNGs), `render` (scene
+file → one PNG), `animate` (scene cuts → GIF). Run `--capabilities` to see
+exactly what each takes.
 
-## Scene file (`meshtui render scene.yaml`, or open in the TUI: `meshtui scene.yaml`)
+## Typical flow
 
-```yaml
-size: [1600, 1200]
-background: "#1a1b26"        # omit or `transparent: true` for alpha
-camera:
-  kind: orthographic          # orthographic | perspective
-  view: "+z"                  # or azimuth/elevation
-  up: [0, 0, 1]               # Z-up parts
-  zoom: 0.9
-light: 1.0
-wireframe: 0.0
-meshes:
-  - path: gear.ply            # `source:` also works
-    name: gear
-    color: "#ff8000"          # name | #RRGGBB | #RRGGBBAA
-    alpha: 1.0
-    visible: true
-    scale: 1.0
-    translate: [0, 0, 0]
+```bash
+# 1. Understand the mesh (bounds, counts, area, volume → pick a camera)
+meshtui info model.ply --json
+
+# 2. One-image "did it render right" check (all 6 axis views in one PNG)
+meshtui screenshot model.ply --views grid --out-dir shots
+
+# 3. Set up a scene declaratively and render it (same file opens in the TUI)
+meshtui render scene.yaml -o out.png
+
+# 4. Animate: base scene + cuts (each cut holds N frames, changes only what
+#    it names) into a looping GIF
+meshtui animate cuts.yaml -o out.gif
 ```
 
-Passing the `.yaml` as the mesh argument opens the same scene in the
-interactive TUI, so an agent-prepared scene looks identical on screen.
-
-## Animation / scene cuts (`meshtui animate cuts.yaml -o out.gif`)
-
-Top level is the scene-file format (base scene) plus `fps`, default
-`frames`, and `cuts:`. Each cut **holds N frames** and changes **only what
-it names**; everything else carries over, so a camera-only move is one line.
-
-```yaml
-size: [800, 600]
-background: "#1a1b26"
-fps: 12
-camera: { kind: orthographic, view: "+z" }
-meshes:
-  - { path: gear.ply, name: gear, color: "#ff8000" }
-  - { path: base.ply, name: base, color: gray }
-cuts:
-  - {}                                   # hold the base scene 1 frame
-  - frames: 8
-    camera: { azimuth: 90 }              # rotate only
-  - frames: 8
-    camera: { azimuth: 180 }
-    meshes: [{ name: gear, color: red }] # and recolor one mesh
-```
-
-- Cut fields: `frames` (hold count), `camera` (any of view/azimuth/
-  elevation/up/zoom/distance/kind/fov), `meshes` (list; matched by `name`,
-  with color/alpha/visible/scale/translate), `light`, `wireframe`.
-- `--frames-dir DIR` writes numbered PNGs instead of a GIF.
-- GIF loops; `background` or `transparent: true` is honored per frame.
-
-## Agent tips
-
-- Discover stats first with `meshtui info <mesh> --json` (has per-mesh
-  `bounds`, `surface_area`, `signed_volume`) to choose a sensible camera.
-- Verify a render's framing by piping the PNG out and reading it back.
-- Prefer `--views grid` for a one-image "did this render right" check.
-- `--json` errors go to stderr as JSON so scripts stay parseable.
+Colors are palette names or `#RRGGBB[AA]`; per-mesh overrides use
+`[name=]path[:color][:alpha][:visible]`; a directory of meshes loads as one
+scene. Details: `meshtui screenshot --help` and `meshtui --capabilities`.

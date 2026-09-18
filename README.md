@@ -100,9 +100,25 @@ meshtui animate cuts.yaml -o out.gif
 ## Headless & agent usage
 
 Every interactive setting is reachable from the terminal, so an agent (or a
-script) can inspect a mesh and produce illustrations without a GUI. See
-[SKILL.md](SKILL.md) for the full reference. Formats: `.ply .stl .obj .drc
-.glb`; a directory loads every supported mesh inside.
+script) can inspect a mesh and produce illustrations without a GUI. The tool
+is self-describing — explore it instead of reading docs:
+
+```bash
+meshtui --capabilities        # machine-readable spec: formats, subcommands,
+                              # scene-file & animation keys
+meshtui <subcommand> --help   # authoritative flags per subcommand
+```
+
+For coding agents, install the skill (a short pointer to `--capabilities`,
+so it never goes stale) into your agent's skills directory:
+
+```bash
+meshtui skill > ~/.agents/skills/meshtui/SKILL.md
+# install.sh offers to do this for you on interactive installs
+```
+
+See [SKILL.md](SKILL.md) for the full reference. Formats: `.ply .stl .obj
+.drc .glb`; a directory loads every supported mesh inside.
 
 ```bash
 # Machine-readable stats
