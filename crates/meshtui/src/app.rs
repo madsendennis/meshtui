@@ -504,12 +504,15 @@ impl App {
             "zoom_out" => self.camera.zoom(oc.zoom_out_factor),
             "toggle_auto_zoom" => {
                 self.auto_zoom = !self.auto_zoom;
-                self.status_message = Some(if self.auto_zoom {
-                    "auto-zoom on (reframes when meshes change)".into()
+                if self.auto_zoom {
+                    // Enabling reframes right away — the current view may
+                    // still hold the manual framing from the off period.
+                    self.frame_visible_meshes_forced();
+                    self.status_message = Some("auto-zoom on (reframed to visible meshes)".into());
                 } else {
-                    "auto-zoom off (camera distance fixed)".into()
-                });
-                rerender = false;
+                    self.status_message = Some("auto-zoom off (camera distance fixed)".into());
+                    rerender = false;
+                }
             }
             "reset_orbital" => self.reset_camera(),
             "view_minus_x" => self.camera.set_view_axis(ViewAxis::NegX),
@@ -2665,8 +2668,14 @@ mod tests {
         app.execute_action("camera_perspective");
         assert_ne!(app.camera.distance, distance);
 
-        // Toggle back on: the next visibility change reframes again.
+        // Toggling back on reframes to the visible meshes right away...
         app.execute_action("toggle_auto_zoom");
+        assert!(
+            (app.camera.target.x - 0.5).abs() < 1.0,
+            "enabling auto-zoom reframes the visible mesh, target={:?}",
+            app.camera.target
+        );
+        // ...and later visibility changes reframe again.
         app.execute_action("mesh_show");
         assert!(
             (app.camera.target.x - 50.0).abs() < 1.0,
