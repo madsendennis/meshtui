@@ -324,6 +324,7 @@ fn default_keybindings() -> HashMap<String, toml::Value> {
         ("orbit_up_fast", "K"),
         ("zoom_in", "z"),
         ("zoom_out", "Z"),
+        ("toggle_auto_zoom", ","),
         ("reset_single_mesh", "r"),
         ("reset_all_meshes", "R"),
         ("reset_orbital", "0"),

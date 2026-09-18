@@ -106,6 +106,10 @@ pub struct App {
     /// open applies the camera before the terminal aspect is known).
     pending_zoom: Option<f32>,
     pending_distance: Option<f32>,
+    /// When on (default), hiding/showing/deleting/adding meshes reframes the
+    /// camera to the visible bounds. Toggle off (`,`) to keep the camera
+    /// distance constant — e.g. while stepping meshes for an animation.
+    auto_zoom: bool,
     dirty: bool,
     render_dirty: bool,
 }
@@ -216,6 +220,7 @@ impl App {
             base_up,
             pending_zoom: None,
             pending_distance: None,
+            auto_zoom: true,
             dirty: true,
             render_dirty: true,
         }
@@ -397,6 +402,15 @@ impl App {
             "orbit_down_fast" => self.camera.orbit(0.0, fast),
             "zoom_in" => self.camera.zoom(oc.zoom_in_factor),
             "zoom_out" => self.camera.zoom(oc.zoom_out_factor),
+            "toggle_auto_zoom" => {
+                self.auto_zoom = !self.auto_zoom;
+                self.status_message = Some(if self.auto_zoom {
+                    "auto-zoom on (reframes when meshes change)".into()
+                } else {
+                    "auto-zoom off (camera distance fixed)".into()
+                });
+                rerender = false;
+            }
             "reset_orbital" => self.reset_camera(),
             "view_minus_x" => self.camera.set_view_axis(ViewAxis::NegX),
             "view_plus_x" => self.camera.set_view_axis(ViewAxis::PosX),
@@ -821,7 +835,19 @@ impl App {
     }
 
     /// Recenter and refit zoom to currently visible meshes, keeping orbit.
+    /// No-op when auto-zoom is toggled off, so the camera distance stays
+    /// constant while meshes are hidden/shown (steady animation frames).
     fn frame_visible_meshes(&mut self) {
+        if !self.auto_zoom {
+            self.render_dirty = true; // visibility changed; framing must not
+            return;
+        }
+        self.frame_visible_meshes_forced();
+    }
+
+    /// Refit regardless of the auto-zoom toggle — for deliberate user
+    /// actions that require it (projection switch, explicit camera reset).
+    fn frame_visible_meshes_forced(&mut self) {
         if let Some((min, max)) = self.scene.visible_bounds() {
             self.camera.reframe_bounds_aspect(
                 min,
@@ -835,13 +861,14 @@ impl App {
     /// Switch ortho/perspective and re-fit the zoom. The two projections frame
     /// the same scene at different distances (ortho is depth-independent,
     /// perspective fits the frustum), so keeping the old distance would clip
-    /// or over-zoom. The orbit (target, orientation) is preserved.
+    /// or over-zoom. The orbit (target, orientation) is preserved. Always
+    /// refits, even with auto-zoom off — the switch is deliberate.
     fn set_camera_kind(&mut self, kind: CameraKind) {
         if self.camera.kind == kind {
             return;
         }
         self.camera.kind = kind;
-        self.frame_visible_meshes();
+        self.frame_visible_meshes_forced();
     }
 
     fn reset_all(&mut self) {
@@ -1140,8 +1167,9 @@ impl App {
             } else {
                 format!(" | filter:{:?}", self.mesh_filter)
             };
+            let fit = if self.auto_zoom { "" } else { " | fit:manual" };
             format!(
-                " {kind} | wf:{:.1} | light:{:.1}x | marked:{}{filter}{animation} | ? commands | q quit",
+                " {kind} | wf:{:.1} | light:{:.1}x | marked:{}{filter}{animation}{fit} | ? commands | q quit",
                 self.wireframe_thickness, self.light_scale, self.marked.len(),
             )
         });
@@ -2280,6 +2308,44 @@ mod tests {
             combined_distance
         );
         assert_eq!(app.camera.orientation, orientation);
+    }
+
+    #[test]
+    fn auto_zoom_off_keeps_camera_fixed_when_meshes_change() {
+        let mut scene = Scene::new();
+        scene.meshes.push(triangle_at("near", Vec3::ZERO, 1.0));
+        scene
+            .meshes
+            .push(triangle_at("far", Vec3::new(100.0, 0.0, 0.0), 1.0));
+        let mut app = App::new(scene, Config::load(None).unwrap());
+        let distance = app.camera.distance;
+        let target = app.camera.target;
+
+        // Toggle off, then hide the far mesh: framing must not move.
+        app.execute_action("toggle_auto_zoom");
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("auto-zoom off (camera distance fixed)")
+        );
+        assert_eq!(app.selected, 1, "alphabetical first mesh is far");
+        app.execute_action("mesh_hide");
+        assert!(!app.scene.meshes[1].visible);
+        assert_eq!(app.camera.distance, distance, "no refit with auto-zoom off");
+        assert_eq!(app.camera.target, target, "no recenter with auto-zoom off");
+
+        // A deliberate projection switch still refits (it must, or the scene
+        // would clip), even with auto-zoom off.
+        app.execute_action("camera_perspective");
+        assert_ne!(app.camera.distance, distance);
+
+        // Toggle back on: the next visibility change reframes again.
+        app.execute_action("toggle_auto_zoom");
+        app.execute_action("mesh_show");
+        assert!(
+            (app.camera.target.x - 50.0).abs() < 1.0,
+            "re-enabled auto-zoom reframes the combined scene, target={:?}",
+            app.camera.target
+        );
     }
 
     #[test]

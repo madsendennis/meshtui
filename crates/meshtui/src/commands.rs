@@ -90,6 +90,11 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         section: "Camera",
+        action: "toggle_auto_zoom",
+        description: "Toggle auto-zoom (reframe when meshes change)",
+    },
+    CommandSpec {
+        section: "Camera",
         action: "reset_orbital",
         description: "Reset camera",
     },
