@@ -422,7 +422,7 @@ fn print_capabilities() {
             },
         },
         "scene_file_open": "passing a .yaml/.yml as the mesh argument opens that scene in the TUI",
-        "tui_recording": "in the TUI: tap the quit key twice to start recording, tap it once per camera move to add a cut, press Q to finish (asks for the GIF duration) and write an animation YAML for `meshtui animate`",
+        "tui_recording": "in the TUI: double-tap the record key (q) to start recording, tap it once per camera move to add a cut, press Q to finish (asks for the GIF duration) — writes the animation YAML plus rendered PNG frames and a GIF automatically",
     });
     println!("{}", serde_json::to_string_pretty(&spec).unwrap());
 }

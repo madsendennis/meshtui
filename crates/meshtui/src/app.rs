@@ -108,6 +108,13 @@ struct Recording {
     poses: Vec<RecordedPose>,
 }
 
+/// A finished recording waiting to be rendered. The event loop picks it up
+/// right after a draw, so the "rendering…" status is on screen while the
+/// (blocking) render runs.
+struct PendingRecordingRender {
+    yaml_path: std::path::PathBuf,
+}
+
 pub struct App {
     pub scene: Scene,
     pub camera: Camera,
@@ -149,6 +156,8 @@ pub struct App {
     /// each further quit-key press adds a camera cut, and the record-stop
     /// key (`Q`) asks for the GIF duration and writes the animation file.
     recording: Option<Recording>,
+    /// Finished recording queued for PNG+GIF rendering (see the event loop).
+    pending_recording_render: Option<PendingRecordingRender>,
     /// Set by the first record-key press; the NEXT key resolves it: the
     /// record key again starts a recording, anything else clears it (and, on
     /// legacy configs where record shares the quit key, quits).
@@ -265,6 +274,7 @@ impl App {
             pending_distance: None,
             pending_target: None,
             recording: None,
+            pending_recording_render: None,
             pending_record: false,
             auto_zoom: true,
             dirty: true,
@@ -850,10 +860,23 @@ impl App {
                                 .map(|d| d.as_secs())
                                 .unwrap_or(0);
                             let path = std::path::PathBuf::from(format!("meshtui_anim_{ts}.yaml"));
-                            self.status_message = Some(match self.finish_recording(s, &path) {
-                                Ok(msg) => msg,
-                                Err(e) => format!("recording failed: {e}"),
-                            });
+                            match self.finish_recording(s, &path) {
+                                Ok(_) => {
+                                    // The event loop renders after the next
+                                    // draw, so this status is visible while
+                                    // the (blocking) render runs.
+                                    self.pending_recording_render = Some(PendingRecordingRender {
+                                        yaml_path: path.clone(),
+                                    });
+                                    self.status_message = Some(format!(
+                                        "wrote {} — rendering frames + GIF…",
+                                        path.display()
+                                    ));
+                                }
+                                Err(e) => {
+                                    self.status_message = Some(format!("recording failed: {e}"));
+                                }
+                            }
                             keep_open = false;
                         }
                         _ => *error = Some("Enter a duration in seconds (0.1-600)".into()),
@@ -1060,8 +1083,7 @@ impl App {
         std::fs::write(path, &yaml).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
         let cuts = rec.poses.len().saturating_sub(1).max(1);
         Ok(format!(
-            "wrote {} ({cuts} cuts, ~{seconds:.1}s) — replay: meshtui animate {}",
-            path.display(),
+            "wrote {} ({cuts} cuts, ~{seconds:.1}s)",
             path.display(),
         ))
     }
@@ -2080,6 +2102,16 @@ fn event_loop(app: &mut App, terminal: &mut DefaultTerminal) -> io::Result<()> {
             app.dirty = false;
         }
 
+        // A just-finished recording renders here — AFTER the "rendering…"
+        // status above was drawn, so it's on screen during the blocking work.
+        if let Some(job) = app.pending_recording_render.take() {
+            app.status_message = Some(match render_recording(&job) {
+                Ok(msg) => msg,
+                Err(e) => format!("render failed: {e} (the YAML file is still there)"),
+            });
+            app.dirty = true;
+        }
+
         // Poll often enough for either live theme changes or animation.
         let wait = app.wait_duration(theme_watcher.is_some(), Instant::now());
         event::poll(wait)?;
@@ -2297,6 +2329,46 @@ fn quat_yaml(q: glam::Quat) -> String {
 
 fn vec3_yaml(v: Vec3) -> String {
     format!("[{}, {}, {}]", fmt_f32(v.x), fmt_f32(v.y), fmt_f32(v.z))
+}
+
+/// Render a finished recording to PNG frames plus a GIF, next to the YAML.
+fn render_recording(job: &PendingRecordingRender) -> Result<String, String> {
+    let anim = crate::animate::load(&job.yaml_path)?;
+    let rendered = crate::animate::render(&anim, None, None)?;
+    let frame_count = rendered.frames.len();
+    let fps = rendered.fps;
+
+    let stem = job
+        .yaml_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("meshtui_anim");
+    let dir = job.yaml_path.with_file_name(format!("{stem}_frames"));
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let width = frame_count.to_string().len();
+    for (i, raw) in rendered.frames.iter().enumerate() {
+        let pixels = crate::animate::composite_frame(raw.clone(), rendered.background);
+        let path = dir.join(format!("frame_{i:0width$}.png"));
+        image::write_buffer_with_format(
+            &mut std::io::BufWriter::new(std::fs::File::create(&path).map_err(|e| e.to_string())?),
+            &pixels,
+            rendered.width,
+            rendered.height,
+            image::ColorType::Rgba8,
+            image::ImageFormat::Png,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    let gif_path = job.yaml_path.with_extension("gif");
+    crate::animate::encode_gif(&rendered, &gif_path)?;
+    Ok(format!(
+        "rendered {} ({} frames @ {} fps) + {}",
+        gif_path.display(),
+        frame_count,
+        fps,
+        dir.display(),
+    ))
 }
 
 /// Save a freshly rendered frame as PNG (never a stale cached frame).
