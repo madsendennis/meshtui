@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use glam::Vec3;
-use meshtui_core::camera::{look_rotation, ViewAxis};
+use meshtui_core::camera::ViewAxis;
 use meshtui_core::{Color, Scene};
 
 use crate::app::App;
@@ -174,6 +174,9 @@ pub fn apply_headless(app: &mut App, opts: &HeadlessOpts) {
     if let Some(fov) = opts.fov {
         app.camera.fov_degrees = fov;
     }
+    // The world up vector is the orbit reference. `set_up` re-orients the
+    // whole camera to it (tumbles the world), establishing the frame the
+    // view/azimuth/elevation below build on.
     if let Some(up) = opts.up {
         app.camera.set_up(up);
     }
@@ -181,12 +184,14 @@ pub fn apply_headless(app: &mut App, opts: &HeadlessOpts) {
         app.camera.set_view_axis(axis);
     }
     if opts.azimuth.is_some() || opts.elevation.is_some() {
+        // Orbit RELATIVE to the current (view) pose: azimuth turns around the
+        // world up axis, elevation tilts around the camera's right axis. The
+        // base view (or default) is the az=0/el=0 reference, so
+        // `--view -x --azimuth 180` lands exactly opposite that view.
         let az = opts.azimuth.unwrap_or(0.0).to_radians();
-        let el = opts.elevation.unwrap_or(30.0).to_radians();
-        let up = app.camera.up();
-        let (right, fwd) = basis(up);
-        let dir = right * (el.cos() * az.cos()) + fwd * (el.cos() * az.sin()) + up * el.sin();
-        app.camera.orientation = look_rotation(dir, up);
+        let el = opts.elevation.unwrap_or(0.0).to_radians();
+        let up = opts.up.unwrap_or_else(|| app.camera.up());
+        app.camera.orbit_around(up, az, el);
     }
     if let Some(zoom) = opts.zoom {
         app.camera.zoom(zoom);
@@ -200,15 +205,6 @@ pub fn apply_headless(app: &mut App, opts: &HeadlessOpts) {
     if let Some(wireframe) = opts.wireframe {
         app.set_wireframe_thickness(wireframe);
     }
-}
-
-/// Right/forward basis perpendicular to `up` (matches the camera math).
-fn basis(up: Vec3) -> (Vec3, Vec3) {
-    let up = up.normalize_or(Vec3::Y);
-    let helper = if up.y.abs() > 0.99 { Vec3::X } else { Vec3::Y };
-    let right = up.cross(helper).normalize_or(Vec3::X);
-    let fwd = right.cross(up).normalize_or(Vec3::Z);
-    (right, fwd)
 }
 
 #[cfg(test)]

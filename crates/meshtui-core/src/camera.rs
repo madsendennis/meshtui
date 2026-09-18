@@ -313,6 +313,18 @@ impl Camera {
         self.orientation = (yaw * pitch * self.orientation).normalize();
     }
 
+    /// Orbit relative to the *current* pose: `azimuth` turns around the given
+    /// world `up` axis, `elevation` tilts around the camera's right axis.
+    /// Used by the headless `--azimuth/--elevation` flags and animation cuts
+    /// so a base `--view -x --azimuth 180` lands exactly opposite that view
+    /// (instead of orbiting in a frame unrelated to the chosen view).
+    pub fn orbit_around(&mut self, world_up: Vec3, azimuth: f32, elevation: f32) {
+        let up = world_up.normalize_or(Vec3::Y);
+        let yaw = Quat::from_axis_angle(up, -azimuth);
+        let pitch = Quat::from_axis_angle(self.right(), elevation);
+        self.orientation = (yaw * pitch * self.orientation).normalize();
+    }
+
     pub fn zoom(&mut self, factor: f32) {
         match self.kind {
             CameraKind::Perspective => {
@@ -503,6 +515,32 @@ mod tests {
         c.set_spherical(0.0, std::f32::consts::FRAC_PI_2, Vec3::Y);
         assert!((c.position() - default_pos).length() < 1e-5);
         assert!((c.up() - default_up).length() < 1e-5);
+    }
+
+    #[test]
+    fn orbit_around_is_view_relative_and_reaches_opposite() {
+        // Base view -x (camera back dir -X); orbiting azimuth 180° around +Y
+        // must land exactly opposite (+X), and 90° must stay in the
+        // horizontal plane (up stays +Y, no roll).
+        let mut c = cam();
+        c.set_view_axis(ViewAxis::NegX);
+        c.set_up(Vec3::Y);
+        let base = c.offset_dir();
+        c.orbit_around(Vec3::Y, 180f32.to_radians(), 0.0);
+        assert!(
+            c.offset_dir().dot(-base) > 0.999,
+            "180° reaches the back: {:?}",
+            c.offset_dir()
+        );
+        let mut c = cam();
+        c.set_view_axis(ViewAxis::NegX);
+        c.set_up(Vec3::Y);
+        c.orbit_around(Vec3::Y, 90f32.to_radians(), 0.0);
+        assert!(
+            c.up().dot(Vec3::Y) > 0.999,
+            "azimuth-only orbit keeps +Y up (no roll): {:?}",
+            c.up()
+        );
     }
 
     #[test]
