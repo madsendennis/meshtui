@@ -84,9 +84,11 @@ pub struct CameraSpec {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct MeshEntry {
-    /// Mesh file or directory (`path` or `source` are synonyms).
+    /// Mesh file or directory (`path` or `source` are synonyms). Optional in
+    /// animation cuts, where an entry references an already-loaded mesh by
+    /// `name` instead of loading a new one.
     #[serde(alias = "source")]
-    pub path: String,
+    pub path: Option<String>,
     pub name: Option<String>,
     pub color: Option<ColorSpec>,
     pub alpha: Option<f32>,
@@ -166,16 +168,7 @@ pub enum SceneError {
 pub fn parse_str(text: &str) -> Result<SceneFile, SceneError> {
     let mut file: SceneFile =
         serde_yml::from_str(text).map_err(|e| SceneError::Parse(e.to_string()))?;
-    // Fold flat top-level output keys into `output` (nested wins).
-    if file.output.size.is_none() {
-        file.output.size = file.flat_size;
-    }
-    if file.output.background.is_none() {
-        file.output.background = file.flat_background.clone();
-    }
-    if file.output.transparent.is_none() {
-        file.output.transparent = file.flat_transparent;
-    }
+    file.fold_output();
     Ok(file)
 }
 
@@ -186,12 +179,32 @@ pub fn load(path: &Path) -> Result<SceneFile, SceneError> {
 }
 
 impl SceneFile {
+    /// Fold the flat top-level output keys (`size`, `background`,
+    /// `transparent`) into `output`. Idempotent; nested `output.*` wins.
+    /// Call this on a `SceneFile` obtained via `#[serde(flatten)]` (which
+    /// bypasses [`parse_str`]'s folding).
+    pub fn fold_output(&mut self) {
+        if self.output.size.is_none() {
+            self.output.size = self.flat_size;
+        }
+        if self.output.background.is_none() {
+            self.output.background = self.flat_background.clone();
+        }
+        if self.output.transparent.is_none() {
+            self.output.transparent = self.flat_transparent;
+        }
+    }
+
     /// Build the mesh scene: load each entry, apply overrides (name, color,
     /// alpha, visibility, uniform scale + translate).
     pub fn build_scene(&self) -> Result<Scene, SceneError> {
         let mut scene = Scene::new();
         for entry in &self.meshes {
-            let mut meshes = crate::loaders::load_path(Path::new(&entry.path))
+            let path = entry
+                .path
+                .as_deref()
+                .ok_or_else(|| SceneError::Load("mesh entry needs a path".into()))?;
+            let mut meshes = crate::loaders::load_path(Path::new(path))
                 .map_err(|e| SceneError::Load(e.to_string()))?;
             for mesh in &mut meshes {
                 entry.apply(mesh);
@@ -251,7 +264,7 @@ mod tests {
     fn parses_minimal_scene() {
         let file = parse_str("meshes:\n  - path: a.ply\n").unwrap();
         assert_eq!(file.meshes.len(), 1);
-        assert_eq!(file.meshes[0].path, "a.ply");
+        assert_eq!(file.meshes[0].path.as_deref(), Some("a.ply"));
     }
 
     #[test]

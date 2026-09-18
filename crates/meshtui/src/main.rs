@@ -8,6 +8,7 @@
 //! Exit codes: 0 success, 1 error (unlike the Python version, where Typer
 //! swallowed the return value and every failure exited 0).
 
+mod animate;
 mod app;
 mod commands;
 mod headless;
@@ -113,6 +114,28 @@ enum Commands {
         /// Force a transparent background
         #[arg(long)]
         transparent: bool,
+    },
+    /// Render an animation (scene + cuts YAML) to a GIF
+    Animate {
+        /// Animation file (YAML): base scene + cuts
+        #[arg(value_name = "CUTS.yaml")]
+        file: PathBuf,
+
+        /// Output path (default: <file>.gif)
+        #[arg(short, long, value_name = "OUT")]
+        output: Option<PathBuf>,
+
+        /// Extra TOML config merged over the user config
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+
+        /// Override the animation's size, WxH
+        #[arg(long, value_parser = parse_size)]
+        size: Option<(u32, u32)>,
+
+        /// Output individual PNG frames to DIR instead of a GIF
+        #[arg(long, value_name = "DIR")]
+        frames_dir: Option<PathBuf>,
     },
 }
 
@@ -332,6 +355,55 @@ fn run_render(
         .unwrap_or_else(|| scene_path.with_extension("png"));
     save_shot(&mut app, &out, (w, h), &opts)?;
     println!("{}", out.display());
+    Ok(())
+}
+
+/// `meshtui animate cuts.yaml -o out.gif`: render an animation and assemble
+/// it into a GIF (or dump PNG frames into `--frames-dir`).
+fn run_animate(
+    file: &Path,
+    output: Option<&Path>,
+    config_path: Option<&Path>,
+    size: Option<(u32, u32)>,
+    frames_dir: Option<&Path>,
+) -> Result<(), String> {
+    let anim = animate::load(file)?;
+    let rendered = animate::render(&anim, config_path, size)?;
+    let frames = rendered.frames.len();
+    let fps = rendered.fps;
+
+    if let Some(dir) = frames_dir {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        let width = frames.to_string().len();
+        for (i, pixels) in rendered.frames.iter().enumerate() {
+            let pixels = composite(
+                pixels.clone(),
+                rendered.width,
+                &HeadlessOpts {
+                    background: rendered.background.map(|c| {
+                        [
+                            (c[0] * 255.0) as u8,
+                            (c[1] * 255.0) as u8,
+                            (c[2] * 255.0) as u8,
+                            (c[3] * 255.0) as u8,
+                        ]
+                    }),
+                    transparent: rendered.transparent,
+                    ..Default::default()
+                },
+            );
+            let path = dir.join(format!("frame_{i:0width$}.png"));
+            write_png(&path, &pixels, rendered.width, rendered.height)?;
+        }
+        println!("wrote {frames} frames to {}", dir.display());
+        return Ok(());
+    }
+
+    let out = output
+        .map(PathBuf::from)
+        .unwrap_or_else(|| file.with_extension("gif"));
+    animate::encode_gif(&rendered, &out)?;
+    println!("{} ({} frames @ {} fps)", out.display(), frames, fps);
     Ok(())
 }
 
@@ -780,8 +852,26 @@ fn run(cli: Cli) -> Result<(), String> {
                 args.size,
             );
         }
-        Some(Commands::Render { .. }) => {} // handled below
+        Some(Commands::Render { .. }) => {}  // handled below
+        Some(Commands::Animate { .. }) => {} // handled below
         None => {}
+    }
+
+    if let Some(Commands::Animate {
+        file,
+        output,
+        config: cfg,
+        size,
+        frames_dir,
+    }) = &cli.command
+    {
+        return run_animate(
+            file,
+            output.as_deref(),
+            cfg.as_deref(),
+            *size,
+            frames_dir.as_deref(),
+        );
     }
 
     if let Some(Commands::Render {

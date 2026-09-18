@@ -19,6 +19,8 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 libc.workspace = true
+gif = "0.14.2"
+serde_yml = "0.0.13"
 
 [dev-dependencies]
 criterion.workspace = true

@@ -1274,6 +1274,7 @@ dependencies = [
  "criterion",
  "crossterm",
  "dirs",
+ "gif",
  "glam",
  "image",
  "libc",
@@ -1284,6 +1285,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "serde_yml",
  "toml",
 ]
 
