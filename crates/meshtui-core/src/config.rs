@@ -331,6 +331,8 @@ fn default_keybindings() -> HashMap<String, toml::Value> {
         ("mesh_show", "S"),
         ("mesh_color_next", "c"),
         ("mesh_color_prev", "C"),
+        ("mesh_alpha_up", "T"),
+        ("mesh_alpha_down", "t"),
         ("mesh_custom_color", "x"),
         ("mesh_toggle_mark", "space"),
         ("mesh_select_all", "ctrl+a"),

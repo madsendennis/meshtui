@@ -404,7 +404,21 @@ fn raster_triangle(
                     continue;
                 }
             }
-            out_color[idx] = px;
+            // Alpha-blend semi-transparent triangles over whatever is behind
+            // (z-buffer already resolved occlusion); opaque writes replace.
+            let alpha = px[3];
+            out_color[idx] = if alpha < 255 {
+                let dst = out_color[idx];
+                let a = alpha as f32 / 255.0;
+                [
+                    (px[0] as f32 * a + dst[0] as f32 * (1.0 - a)).round() as u8,
+                    (px[1] as f32 * a + dst[1] as f32 * (1.0 - a)).round() as u8,
+                    (px[2] as f32 * a + dst[2] as f32 * (1.0 - a)).round() as u8,
+                    (alpha as f32 + dst[3] as f32 * (1.0 - a)).round() as u8,
+                ]
+            } else {
+                px
+            };
             out_depth[idx] = z;
         }
     }
@@ -579,6 +593,23 @@ mod tests {
         assert_eq!(frame.pixels[center + 3], 255);
         // corner is background (transparent)
         assert_eq!(frame.pixels[3], 0);
+    }
+
+    #[test]
+    fn semi_transparent_mesh_blends_over_background() {
+        let mut scene = quad_scene();
+        scene.meshes[0].color = [1.0, 0.0, 0.0, 0.5]; // 50% red
+        let (min, max) = scene.visible_bounds().unwrap();
+        let mut cam = Camera::frame_bounds(min, max, CameraKind::Perspective, 60.0, 1.2);
+        cam.set_view_axis(meshtui_core::ViewAxis::PosZ);
+        let mut r = SoftwareRasterizer { options: opts() };
+        let frame = r.render(&scene, &cam, 64, 64).expect("visible mesh");
+        let center = (32 * 64 + 32) * 4;
+        // Over a transparent background, alpha "over" blends toward the bg
+        // (0,0,0,0): the red is scaled by alpha and alpha stays < 255.
+        let a = frame.pixels[center + 3];
+        assert!(a < 255, "semi-transparent alpha, got {a}");
+        assert!(a > 100, "alpha accumulates over empty bg, got {a}");
     }
 
     #[test]

@@ -163,6 +163,8 @@ mesh_show = "S"
 # Mesh color controls
 mesh_color_next = "c"
 mesh_color_prev = "C"
+mesh_alpha_up = "T"                    # More opaque
+mesh_alpha_down = "t"                  # More transparent
 
 # Mesh reset controls
 mesh_custom_color = "x"

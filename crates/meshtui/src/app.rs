@@ -397,6 +397,16 @@ impl App {
                 self.cycle_color(-1);
                 self.status_message = Some(format!("recolored {count} mesh(es)"));
             }
+            "mesh_alpha_up" => {
+                let count = self.target_indices().len();
+                self.cycle_alpha(0.25);
+                self.status_message = Some(format!("opacity up for {count} mesh(es)"));
+            }
+            "mesh_alpha_down" => {
+                let count = self.target_indices().len();
+                self.cycle_alpha(-0.25);
+                self.status_message = Some(format!("opacity down for {count} mesh(es)"));
+            }
             "mesh_custom_color" => {
                 self.modal = Some(Modal::HexColor {
                     input: String::new(),
@@ -797,6 +807,21 @@ impl App {
             );
             self.camera.set_up(up);
         }
+    }
+
+    /// Cycle per-mesh opacity (t/T). Stepping past opaque wraps to fully
+    /// transparent and back so repeated presses toggle through the levels.
+    fn cycle_alpha(&mut self, step: f32) {
+        for index in self.target_indices() {
+            if let Some(mesh) = self.scene.meshes.get_mut(index) {
+                let a = mesh.color[3];
+                // Snap to clean quarter steps, then advance and wrap 0..=1.
+                let level =
+                    ((a * 4.0).round() as i32 + if step > 0.0 { 1 } else { -1 }).rem_euclid(5);
+                mesh.color[3] = level as f32 / 4.0;
+            }
+        }
+        self.render_dirty = true;
     }
 
     fn cycle_color(&mut self, dir: i32) {

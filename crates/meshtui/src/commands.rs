@@ -220,6 +220,16 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         section: "Meshes",
+        action: "mesh_alpha_up",
+        description: "Increase mesh opacity",
+    },
+    CommandSpec {
+        section: "Meshes",
+        action: "mesh_alpha_down",
+        description: "Decrease mesh opacity",
+    },
+    CommandSpec {
+        section: "Meshes",
         action: "reset_single_mesh",
         description: "Reset selected or marked meshes",
     },

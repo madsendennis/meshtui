@@ -80,6 +80,74 @@ meshtui screenshot model.ply --views ring:12 --prefix gear
 
 # Or all 6 axis views composited into one PNG (2 rows x 3 cols)
 meshtui screenshot model.ply --views grid --size 1920x1280
+
+# Full scene control: per-mesh color/alpha/visibility plus camera,
+# lighting, wireframe, and background flags
+meshtui screenshot \
+  "gear=parts/gear.ply:color=#ff8000:alpha=0.9" \
+  "base.ply:color=gray" \
+  --camera persp --azimuth 30 --elevation 20 --up 0,0,1 \
+  --background '#1a1b26' --views grid --out-dir shots
+
+# Render a declarative scene file to one PNG (or open it in the TUI)
+meshtui render scene.yaml -o out.png
+meshtui scene.yaml            # same scene, interactive
+
+# Render an animation (base scene + scene cuts) to a GIF
+meshtui animate cuts.yaml -o out.gif
+```
+
+## Headless & agent usage
+
+Every interactive setting is reachable from the terminal, so an agent (or a
+script) can inspect a mesh and produce illustrations without a GUI. See
+[SKILL.md](SKILL.md) for the full reference. Formats: `.ply .stl .obj .drc
+.glb`; a directory loads every supported mesh inside.
+
+```bash
+# Machine-readable stats
+meshtui info model.ply --json | jq '.meshes[0].bounds'
+
+# Multi-view, all in one PNG
+meshtui screenshot model.ply --views grid --out-dir shots
+```
+
+### Scene files
+
+`meshtui render scene.yaml -o out.png` renders a YAML scene (meshes with
+color/alpha/visibility/transform, camera, lighting, and output
+size/background/transparent). The same file passed as `meshtui scene.yaml`
+opens interactively, so a scene prepared for an agent looks identical in the
+TUI. Example:
+
+```yaml
+size: [1600, 1200]
+background: "#1a1b26"
+camera: { kind: orthographic, view: "+z", up: [0, 0, 1] }
+meshes:
+  - { path: gear.ply, name: gear, color: "#ff8000", alpha: 0.9 }
+  - { path: base.ply, name: base, color: gray }
+```
+
+### Animations (scene cuts → GIF)
+
+`meshtui animate cuts.yaml -o out.gif` renders a base scene plus a list of
+cuts. Each cut holds N frames (`fps`-timed) and changes only what it names —
+camera, per-mesh color/alpha/visibility/transform, light, wireframe — so a
+camera-only move is one line. `--frames-dir DIR` dumps PNGs instead.
+
+```yaml
+size: [800, 600]
+fps: 12
+camera: { kind: orthographic, view: "+z" }
+meshes:
+  - { path: gear.ply, name: gear, color: "#ff8000" }
+cuts:
+  - {}
+  - frames: 8
+    camera: { azimuth: 90 }
+  - frames: 8
+    meshes: [{ name: gear, color: red }]
 ```
 
 ## Configuration
@@ -114,6 +182,7 @@ The side panel always shows the active selection controls:
 | `F` | Clear the filter |
 | `s` / `S` | Hide or show the selected meshes |
 | `c` / `C` | Cycle selected mesh colors |
+| `t` / `T` | Cycle selected mesh transparency |
 | `x` | Set a custom color |
 
 ## Editing the open scene
