@@ -106,12 +106,14 @@ pub fn render(
     let scene: Scene = anim.scene.build_scene().map_err(|e| e.to_string())?;
     let config = Config::load_effective(config_path).map_err(|e| e.to_string())?;
     let mut app = App::new(scene, config);
-    apply_scene_camera(&mut app, &anim.scene);
 
     let (w, h) = size_override
         .or_else(|| anim.scene.output.size.map(|[a, b]| (a, b)))
         .unwrap_or((800, 600));
+    // Fit to the viewport FIRST (the one-time auto-fit resets ortho_scale),
+    // then apply the scene's camera/zoom so they aren't cancelled.
     app.set_aspect(w as f32 / h as f32);
+    apply_scene_camera(&mut app, &anim.scene);
 
     let fps = anim.fps.unwrap_or(12).clamp(1, 60);
     let default_frames = anim.frames.unwrap_or(1).max(1);
@@ -181,6 +183,36 @@ fn apply_cut(app: &mut App, cut: &Cut) {
         }
     }
     for entry in &cut.meshes {
+        // A cut entry with a `path` (re)loads that mesh: match an existing
+        // mesh by name and replace its geometry, else append it. This makes
+        // per-frame mesh swaps possible in one animate run.
+        if let Some(path) = entry.path.as_deref() {
+            let loaded = meshtui_core::loaders::load_path(std::path::Path::new(path))
+                .map_err(|e| e.to_string());
+            if let Ok(mut meshes) = loaded {
+                if let Some(first) = meshes.first_mut() {
+                    apply_mesh_cut(first, entry);
+                    if let Some(name) = &entry.name {
+                        first.name = name.clone();
+                    }
+                    let idx = entry
+                        .name
+                        .as_deref()
+                        .and_then(|n| app.scene.meshes.iter().position(|m| m.name == n));
+                    match idx {
+                        Some(i) => {
+                            // Keep the replaced mesh's color unless overridden.
+                            if entry.color.is_none() {
+                                first.color = app.scene.meshes[i].color;
+                            }
+                            app.scene.meshes[i] = first.clone();
+                        }
+                        None => app.scene.meshes.push(first.clone()),
+                    }
+                }
+            }
+            continue;
+        }
         // Match by name first, else by index among current meshes.
         let idx = entry
             .name

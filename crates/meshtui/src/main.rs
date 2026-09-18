@@ -143,9 +143,31 @@ enum Commands {
         #[arg(long, value_name = "DIR")]
         frames_dir: Option<PathBuf>,
     },
-    /// Print the agent skill file (SKILL.md) to stdout, e.g. to install it
-    /// into an agent's skills directory: `meshtui skill > ~/.agents/skills/meshtui/SKILL.md`
-    Skill,
+    /// Manage the agent skill (SKILL.md): print it, or install it for your
+    /// coding agents
+    #[command(subcommand)]
+    Skill(SkillCommands),
+}
+
+#[derive(Debug, Subcommand)]
+enum SkillCommands {
+    /// Print SKILL.md to stdout (pipe it anywhere)
+    Print,
+    /// Install the skill for detected coding agents
+    Install {
+        /// Skills directory (default: ~/.agents/skills, symlinked into
+        /// detected agent dirs). Agents that share that dir get it directly.
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+        /// Also link into these agent dirs (default: auto-detected)
+        #[arg(long, value_name = "AGENT")]
+        agent: Vec<String>,
+        /// Print what would be installed without writing anything
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Remove a skill previously installed by `meshtui skill install`
+    Uninstall,
 }
 
 /// Args for `meshtui screenshot` (boxed in the enum to keep it small).
@@ -361,6 +383,161 @@ fn print_capabilities() {
     println!("{}", serde_json::to_string_pretty(&spec).unwrap());
 }
 
+/// Marker file written into a skill dir we create, so uninstall/refresh only
+/// touch skills meshtui itself installed (never a hand-authored one).
+const SKILL_MARKER: &str = ".managed-by-meshtui";
+const SKILL_BODY: &str = include_str!("../../../SKILL.md");
+
+/// The agent-neutral skills directory; agents that need their own dir get a
+/// symlink pointing here (the hey-cli model).
+fn default_skills_dir() -> Result<PathBuf, String> {
+    dirs::home_dir()
+        .map(|h| h.join(".agents/skills"))
+        .ok_or_else(|| "could not determine home directory".into())
+}
+
+/// Detected agent skill dirs that should get a symlink to the shared skill.
+/// Only ones that already exist are linked (we don't create agent config).
+fn detected_agent_dirs() -> Vec<(&'static str, PathBuf)> {
+    let mut out = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        for (name, rel) in [("claude", ".claude/skills"), ("codex", ".codex/skills")] {
+            let dir = home.join(rel);
+            if dir.is_dir() {
+                out.push((name, dir));
+            }
+        }
+    }
+    out
+}
+
+/// `meshtui skill print|install|uninstall`.
+fn run_skill(cmd: &SkillCommands) -> Result<(), String> {
+    match cmd {
+        SkillCommands::Print => {
+            print!("{SKILL_BODY}");
+            Ok(())
+        }
+        SkillCommands::Install {
+            dir,
+            agent,
+            dry_run,
+        } => skill_install(dir.as_deref(), agent, *dry_run),
+        SkillCommands::Uninstall => skill_uninstall(),
+    }
+}
+
+fn skill_install(dir: Option<&Path>, agents: &[String], dry_run: bool) -> Result<(), String> {
+    let base = dir
+        .map(PathBuf::from)
+        .map(Ok)
+        .unwrap_or_else(default_skills_dir)?;
+    let skill_dir = base.join("meshtui");
+    let skill_file = skill_dir.join("SKILL.md");
+
+    // Refuse to overwrite a skill we didn't install (no marker).
+    if skill_dir.exists() && !skill_dir.join(SKILL_MARKER).exists() {
+        return Err(format!(
+            "{} exists and was not installed by meshtui; refusing to overwrite \
+             (remove it yourself, or point --dir elsewhere)",
+            skill_dir.display()
+        ));
+    }
+
+    let mut actions: Vec<String> = Vec::new();
+    if !dry_run {
+        std::fs::create_dir_all(&skill_dir)
+            .map_err(|e| format!("cannot create {}: {e}", skill_dir.display()))?;
+        std::fs::write(&skill_file, SKILL_BODY)
+            .map_err(|e| format!("cannot write {}: {e}", skill_file.display()))?;
+        std::fs::write(skill_dir.join(SKILL_MARKER), env!("CARGO_PKG_VERSION"))
+            .map_err(|e| e.to_string())?;
+    }
+    actions.push(format!("write {}", skill_file.display()));
+
+    // Symlink into detected (or requested) agent dirs.
+    let requested: Vec<(String, PathBuf)> = if agents.is_empty() {
+        detected_agent_dirs()
+            .into_iter()
+            .map(|(n, p)| (n.to_string(), p))
+            .collect()
+    } else {
+        agents
+            .iter()
+            .map(|a| {
+                let home = dirs::home_dir().unwrap_or_default();
+                (a.clone(), home.join(format!(".{a}/skills")))
+            })
+            .collect()
+    };
+    for (name, agent_skills) in requested {
+        let link = agent_skills.join("meshtui");
+        if link.exists() || link.symlink_metadata().is_ok() {
+            // Refresh an existing managed link; leave anything else alone.
+            let managed = link
+                .canonicalize()
+                .map(|t| t == skill_dir.canonicalize().unwrap_or_default())
+                .unwrap_or(false);
+            if !managed {
+                actions.push(format!("skip {} (exists, not ours)", link.display()));
+                continue;
+            }
+            if !dry_run {
+                let _ = std::fs::remove_file(&link);
+            }
+        }
+        if !dry_run {
+            if let Some(parent) = link.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&skill_dir, &link)
+                .map_err(|e| format!("cannot link {}: {e}", link.display()))?;
+        }
+        actions.push(format!(
+            "link {} -> {}",
+            link.display(),
+            skill_dir.display()
+        ));
+        let _ = name;
+    }
+
+    for a in &actions {
+        println!("{a}");
+    }
+    if dry_run {
+        println!("(dry run — nothing written)");
+    }
+    Ok(())
+}
+
+fn skill_uninstall() -> Result<(), String> {
+    let base = default_skills_dir()?;
+    let skill_dir = base.join("meshtui");
+    if !skill_dir.join(SKILL_MARKER).exists() {
+        return Err(format!(
+            "{} was not installed by meshtui; not removing",
+            skill_dir.display()
+        ));
+    }
+    // Remove symlinks in agent dirs that point at our skill, then the skill.
+    for (_, agent_skills) in detected_agent_dirs() {
+        let link = agent_skills.join("meshtui");
+        if link.symlink_metadata().is_ok()
+            && link
+                .canonicalize()
+                .map(|t| t == skill_dir.canonicalize().unwrap_or_default())
+                .unwrap_or(false)
+        {
+            let _ = std::fs::remove_file(&link);
+            println!("removed {}", link.display());
+        }
+    }
+    std::fs::remove_dir_all(&skill_dir).map_err(|e| e.to_string())?;
+    println!("removed {}", skill_dir.display());
+    Ok(())
+}
+
 /// `meshtui render scene.yaml -o out.png`: render a scene file to one PNG.
 fn run_render(
     scene_path: &Path,
@@ -373,12 +550,14 @@ fn run_render(
     let scene = file.build_scene().map_err(|e| e.to_string())?;
     let config = Config::load_effective(config_path).map_err(|e| e.to_string())?;
     let mut app = app::App::new(scene, config);
-    apply_scene_camera(&mut app, &file);
 
     let (w, h) = size
         .or_else(|| file.output.size.map(|[a, b]| (a, b)))
         .unwrap_or((1600, 1200));
+    // Fit to the viewport first, then apply the scene's camera so zoom/scale
+    // aren't cancelled by the one-time auto-fit (which resets ortho_scale).
     app.set_aspect(w as f32 / h as f32);
+    apply_scene_camera(&mut app, &file);
     let transparent = transparent || file.output.transparent.unwrap_or(false);
     let background = if transparent {
         None
@@ -905,10 +1084,7 @@ fn run(cli: Cli) -> Result<(), String> {
         }
         Some(Commands::Render { .. }) => {}  // handled below
         Some(Commands::Animate { .. }) => {} // handled below
-        Some(Commands::Skill) => {
-            print!("{}", include_str!("../../../SKILL.md"));
-            return Ok(());
-        }
+        Some(Commands::Skill(cmd)) => return run_skill(cmd),
         None => {}
     }
 
@@ -1069,6 +1245,28 @@ mod tests {
 
     fn parse(argv: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(argv.iter().copied())
+    }
+
+    #[test]
+    fn skill_install_is_safe_and_idempotent() {
+        let home = std::env::temp_dir().join(format!("meshtui_skill_{}", std::process::id()));
+        let base = home.join("skills");
+        // Install, then reinstall (idempotent), then uninstall.
+        skill_install(Some(&base), &[], false).unwrap();
+        let skill = base.join("meshtui/SKILL.md");
+        assert!(skill.exists());
+        assert!(base.join("meshtui").join(SKILL_MARKER).exists());
+        skill_install(Some(&base), &[], false).unwrap();
+        // A hand-authored skill (no marker) is never overwritten.
+        let unmanaged = home.join("other/skills");
+        std::fs::create_dir_all(unmanaged.join("meshtui")).unwrap();
+        std::fs::write(unmanaged.join("meshtui/SKILL.md"), b"mine").unwrap();
+        assert!(skill_install(Some(&unmanaged), &[], false).is_err());
+        assert_eq!(
+            std::fs::read_to_string(unmanaged.join("meshtui/SKILL.md")).unwrap(),
+            "mine"
+        );
+        std::fs::remove_dir_all(&home).unwrap();
     }
 
     #[test]
