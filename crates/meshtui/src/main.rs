@@ -92,6 +92,28 @@ enum Commands {
     },
     /// Render one mesh from several viewpoints to numbered PNGs
     Screenshot(Box<ScreenshotArgs>),
+    /// Render a scene file (YAML) to a single PNG
+    Render {
+        /// Scene file (YAML). Also accepts a mesh path as shorthand.
+        #[arg(value_name = "SCENE")]
+        scene: PathBuf,
+
+        /// Output PNG path (default: <scene>.png)
+        #[arg(short, long, value_name = "OUT.png")]
+        output: Option<PathBuf>,
+
+        /// Extra TOML config merged over the user config
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+
+        /// Override the scene's size, WxH
+        #[arg(long, value_parser = parse_size)]
+        size: Option<(u32, u32)>,
+
+        /// Force a transparent background
+        #[arg(long)]
+        transparent: bool,
+    },
 }
 
 /// Args for `meshtui screenshot` (boxed in the enum to keep it small).
@@ -217,6 +239,100 @@ fn parse_vec3(s: &str) -> Result<glam::Vec3, String> {
     let v: Result<Vec<f32>, _> = parts.iter().map(|p| p.trim().parse::<f32>()).collect();
     let v = v.map_err(|_| "expected three numbers X,Y,Z".to_string())?;
     Ok(glam::Vec3::new(v[0], v[1], v[2]))
+}
+
+/// True when a mesh argument names a scene file rather than a mesh.
+fn is_scene_file(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("yaml" | "yml")
+    )
+}
+
+/// Apply a scene file's camera/light/wireframe to a freshly built App.
+fn apply_scene_camera(app: &mut app::App, file: &meshtui_core::SceneFile) {
+    let cam = &file.camera;
+    if let Some(kind) = file.camera_kind() {
+        app.camera.kind = kind;
+    }
+    if let Some(fov) = cam.fov {
+        app.camera.fov_degrees = fov;
+    }
+    if let Some(up) = cam.up {
+        app.camera.set_up(glam::Vec3::from(up));
+    }
+    if let Some(view) = cam.view.as_deref().and_then(ViewAxis::parse) {
+        app.camera.set_view_axis(view);
+    }
+    if cam.azimuth.is_some() || cam.elevation.is_some() {
+        headless::apply_headless(
+            app,
+            &HeadlessOpts {
+                azimuth: cam.azimuth,
+                elevation: cam.elevation,
+                ..Default::default()
+            },
+        );
+    }
+    if let Some(zoom) = cam.zoom {
+        app.camera.zoom(zoom);
+    }
+    if let Some(distance) = cam.distance {
+        app.camera.distance = distance.max(1e-3);
+    }
+    if let Some(light) = file.light {
+        app.set_light_scale(light);
+    }
+    if let Some(wireframe) = file.wireframe {
+        app.set_wireframe_thickness(wireframe);
+    }
+}
+
+/// `meshtui render scene.yaml -o out.png`: render a scene file to one PNG.
+fn run_render(
+    scene_path: &Path,
+    output: Option<&Path>,
+    config_path: Option<&Path>,
+    size: Option<(u32, u32)>,
+    transparent: bool,
+) -> Result<(), String> {
+    let file = meshtui_core::scene_file::load(scene_path).map_err(|e| e.to_string())?;
+    let scene = file.build_scene().map_err(|e| e.to_string())?;
+    let config = Config::load_effective(config_path).map_err(|e| e.to_string())?;
+    let mut app = app::App::new(scene, config);
+    apply_scene_camera(&mut app, &file);
+
+    let (w, h) = size
+        .or_else(|| file.output.size.map(|[a, b]| (a, b)))
+        .unwrap_or((1600, 1200));
+    app.set_aspect(w as f32 / h as f32);
+    let transparent = transparent || file.output.transparent.unwrap_or(false);
+    let background = if transparent {
+        None
+    } else {
+        file.output.background.map(|c| c.0)
+    };
+    let opts = HeadlessOpts {
+        background: background.map(|c| {
+            [
+                (c[0] * 255.0) as u8,
+                (c[1] * 255.0) as u8,
+                (c[2] * 255.0) as u8,
+                (c[3] * 255.0) as u8,
+            ]
+        }),
+        transparent,
+        ..Default::default()
+    };
+    let out = output
+        .map(PathBuf::from)
+        .unwrap_or_else(|| scene_path.with_extension("png"));
+    save_shot(&mut app, &out, (w, h), &opts)?;
+    println!("{}", out.display());
+    Ok(())
 }
 
 fn parse_view_set(s: &str) -> Result<ViewSet, String> {
@@ -664,7 +780,25 @@ fn run(cli: Cli) -> Result<(), String> {
                 args.size,
             );
         }
+        Some(Commands::Render { .. }) => {} // handled below
         None => {}
+    }
+
+    if let Some(Commands::Render {
+        scene,
+        output,
+        config: cfg,
+        size,
+        transparent,
+    }) = &cli.command
+    {
+        return run_render(
+            scene,
+            output.as_deref(),
+            cfg.as_deref(),
+            *size,
+            *transparent,
+        );
     }
 
     // Config-only commands run without meshes.
@@ -695,6 +829,26 @@ fn run(cli: Cli) -> Result<(), String> {
     }
 
     let config = Config::load_effective(cli.config.as_deref()).map_err(|e| e.to_string())?;
+
+    // A `.yaml`/`.yml` mesh argument is a scene file: it drives the scene,
+    // camera, and lighting. (Agents hand meshtui a scene directly.)
+    if cli.meshes.len() == 1 && is_scene_file(&cli.meshes[0]) {
+        let file = meshtui_core::scene_file::load(&cli.meshes[0]).map_err(|e| e.to_string())?;
+        let scene = file.build_scene().map_err(|e| e.to_string())?;
+        let mut app = app::App::new(scene, config);
+        apply_scene_camera(&mut app, &file);
+        return match cli.screenshot {
+            Some(path) => {
+                let (w, h) = file.output.size.map(|[a, b]| (a, b)).unwrap_or(cli.size);
+                app.set_aspect(w as f32 / h as f32);
+                app::save_screenshot(&mut app, &path, w, h).map_err(|e| e.to_string())
+            }
+            None if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() => {
+                Err("interactive mode requires a TTY".into())
+            }
+            None => app::run(app).map_err(|e| e.to_string()),
+        };
+    }
 
     let mut scene = Scene::new();
     for path in &cli.meshes {
