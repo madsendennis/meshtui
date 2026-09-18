@@ -95,6 +95,9 @@ pub struct App {
     /// Viewport pixel aspect (width/height) used to fit the camera so meshes
     /// fill wide viewports instead of swimming. 1.0 until the first render.
     aspect: f32,
+    /// The base view pose for absolute `azimuth_to`/`elevation_to` cut
+    /// overrides (set from the scene's camera.view, else the default axis).
+    pub base_view: Option<ViewAxis>,
     dirty: bool,
     render_dirty: bool,
 }
@@ -191,6 +194,7 @@ impl App {
             theme,
             status_message: None,
             aspect: -1.0, // sentinel: unset until set_aspect() before first frame
+            base_view: None,
             dirty: true,
             render_dirty: true,
         }

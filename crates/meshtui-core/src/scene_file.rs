@@ -49,7 +49,7 @@ pub struct SceneFile {
     pub wireframe: Option<f32>,
 
     // Flat top-level synonyms, folded into `output` after parsing.
-    #[serde(rename = "size")]
+    #[serde(rename = "size", default, deserialize_with = "de_opt_size")]
     flat_size: Option<[u32; 2]>,
     #[serde(rename = "background")]
     flat_background: Option<ColorSpec>,
@@ -61,12 +61,39 @@ pub struct SceneFile {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct OutputSpec {
-    /// [width, height] in pixels.
+    /// [width, height] in pixels — or a "800x600" string (CLI parity).
+    #[serde(default, deserialize_with = "de_opt_size")]
     pub size: Option<[u32; 2]>,
     /// Background color; omit for transparent.
     pub background: Option<ColorSpec>,
     /// Force a transparent background (overrides `background` alpha).
     pub transparent: Option<bool>,
+}
+
+/// Accept a size as `[w, h]` or `"WxH"` (matches the CLI `--size`).
+fn de_opt_size<'de, D>(d: D) -> Result<Option<[u32; 2]>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Size {
+        Arr([u32; 2]),
+        Str(String),
+    }
+    match Option::<Size>::deserialize(d)? {
+        None => Ok(None),
+        Some(Size::Arr(a)) => Ok(Some(a)),
+        Some(Size::Str(s)) => {
+            let (w, h) = s
+                .split_once('x')
+                .ok_or_else(|| Error::custom("size must be WxH"))?;
+            let w = w.parse().map_err(|_| Error::custom("bad width"))?;
+            let h = h.parse().map_err(|_| Error::custom("bad height"))?;
+            Ok(Some([w, h]))
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

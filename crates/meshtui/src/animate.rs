@@ -3,21 +3,32 @@
 //! (camera, per-mesh color/alpha/visibility, light, wireframe). meshtui
 //! renders the frames and assembles them into a GIF (or a PNG strip).
 //!
+//! Cut semantics — the #1 thing to know:
+//! - **Camera values are RELATIVE and accumulate across cuts.** `azimuth: 90`
+//!   in two consecutive cuts turns 180° total; `zoom` multiplies (two cuts of
+//!   `zoom: 2` = 4×, like the TUI z/Z). Use `azimuth_to` / `elevation_to` for
+//!   an ABSOLUTE pose (measured from the base view, ignoring earlier cuts).
+//! - **Mesh values are ABSOLUTE** — `color`/`alpha`/`visible`/`scale`/
+//!   `translate` set the value. A mesh entry with `path` reloads that mesh's
+//!   geometry (per-frame mesh swaps).
+//! - `tween: true` on a cut interpolates its changes over its `frames`
+//!   (linear; `ease: in|out|inout` to ease) instead of jumping.
+//!
 //! ```yaml
-//! # Top level reuses the scene-file format (meshes, camera, light, output).
-//! size: [800, 600]
-//! background: "#1a1b26"        # or transparent: true
+//! size: [800, 600]               # or "800x600"
+//! background: "#1a1b26"          # or transparent: true
 //! fps: 12
 //! camera: { kind: orthographic, view: "+z" }
 //! meshes:
 //!   - { path: gear.ply, name: gear, color: "#ff8000" }
-//!   - { path: base.ply, name: base, color: gray }
 //! cuts:
-//!   - {}                        # hold the base scene
-//!   - frames: 8                 # camera-only change
-//!     camera: { azimuth: 90 }
+//!   - {}                                    # hold the base scene 1 frame
 //!   - frames: 8
-//!     meshes: [{ name: gear, color: red }]   # recolor one mesh
+//!     camera: { azimuth: 90 }               # +90° from previous
+//!   - frames: 12, tween: true, ease: inout
+//!     camera: { azimuth_to: 270 }           # glide to an absolute pose
+//!   - frames: 4
+//!     meshes: [{ name: gear, alpha: 0.3 }]  # fade (absolute)
 //! ```
 
 use std::path::Path;
@@ -46,10 +57,14 @@ pub struct AnimFile {
 
 /// One cut: hold for `frames`, applying only the named changes.
 #[derive(Debug, Clone, Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Cut {
     /// Frames to hold this state (default: the file's `frames`, else 1).
     pub frames: Option<u32>,
+    /// Interpolate this cut's changes over its frames instead of jumping.
+    pub tween: Option<bool>,
+    /// Easing for a tween: "linear" (default), "in", "out", "inout".
+    pub ease: Option<String>,
     pub camera: Option<CameraCut>,
     /// Per-mesh changes, matched by `name` (falls back to index order).
     pub meshes: Vec<MeshEntry>,
@@ -59,13 +74,20 @@ pub struct Cut {
 
 /// Camera changes within a cut (all optional; omitted = keep previous).
 #[derive(Debug, Clone, Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct CameraCut {
     pub view: Option<String>,
+    /// Relative: added to the current pose (accumulates across cuts).
     pub azimuth: Option<f32>,
     pub elevation: Option<f32>,
+    /// Absolute: orbit so azimuth/elevation equal these (measured from the
+    /// base view pose), regardless of prior cuts.
+    pub azimuth_to: Option<f32>,
+    pub elevation_to: Option<f32>,
     pub up: Option<[f32; 3]>,
+    /// Relative: multiplies the current zoom (like TUI z/Z).
     pub zoom: Option<f32>,
+    /// Absolute: target→camera distance.
     pub distance: Option<f32>,
     pub kind: Option<String>,
     pub fov: Option<f32>,
@@ -120,9 +142,17 @@ pub fn render(
     let mut frames = Vec::new();
 
     for (i, cut) in anim.cuts.iter().enumerate() {
-        apply_cut(&mut app, cut);
         let hold = cut.frames.unwrap_or(default_frames).max(1);
-        for _ in 0..hold {
+        let tween = cut.tween.unwrap_or(false) && hold > 1;
+        // Snapshot state before the cut so a tween can interpolate from it.
+        let before = tween.then(|| Snapshot::of(&app));
+        for f in 0..hold {
+            if tween {
+                let t = ease(cut.ease.as_deref(), (f + 1) as f32 / hold as f32);
+                apply_cut_tweened(&mut app, before.as_ref().unwrap(), cut, t);
+            } else if f == 0 {
+                apply_cut(&mut app, cut);
+            }
             let frame = app
                 .render_frame(w, h)
                 .ok_or_else(|| format!("cut {i}: nothing to render (all meshes hidden)"))?;
@@ -164,6 +194,26 @@ fn apply_cut(app: &mut App, cut: &Cut) {
         }
         if let Some(view) = cam.view.as_deref().and_then(meshtui_core::ViewAxis::parse) {
             app.camera.set_view_axis(view);
+        }
+        // Absolute pose: reset to the base view, then orbit to az/el.
+        if cam.azimuth_to.is_some() || cam.elevation_to.is_some() {
+            if let Some(view) = cam
+                .view
+                .as_deref()
+                .and_then(meshtui_core::ViewAxis::parse)
+                .or(app.base_view)
+            {
+                app.camera.set_view_axis(view);
+            }
+            headless::apply_headless(
+                app,
+                &HeadlessOpts {
+                    azimuth: cam.azimuth_to,
+                    elevation: cam.elevation_to,
+                    up: cam.up.map(glam::Vec3::from),
+                    ..Default::default()
+                },
+            );
         }
         if cam.azimuth.is_some() || cam.elevation.is_some() {
             headless::apply_headless(
@@ -233,6 +283,122 @@ fn apply_cut(app: &mut App, cut: &Cut) {
     }
 }
 
+/// Camera state captured before a tweened cut, to interpolate from.
+struct Snapshot {
+    orientation: glam::Quat,
+    distance: f32,
+    ortho_scale: f32,
+}
+
+impl Snapshot {
+    fn of(app: &App) -> Self {
+        Self {
+            orientation: app.camera.orientation,
+            distance: app.camera.distance,
+            ortho_scale: app.camera.ortho_scale,
+        }
+    }
+}
+
+/// Easing curve: linear (default), in, out, inout.
+fn ease(name: Option<&str>, t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    match name.unwrap_or("linear") {
+        "in" => t * t,
+        "out" => 1.0 - (1.0 - t) * (1.0 - t),
+        "inout" => {
+            if t < 0.5 {
+                2.0 * t * t
+            } else {
+                1.0 - 2.0 * (1.0 - t) * (1.0 - t)
+            }
+        }
+        _ => t,
+    }
+}
+
+/// Interpolate a cut's camera/mesh changes between the pre-cut snapshot and
+/// the fully-applied end state at fraction `t` (0..=1).
+fn apply_cut_tweened(app: &mut App, before: &Snapshot, cut: &Cut, t: f32) {
+    // Snapshot the meshes this cut touches (for color/alpha lerp).
+    let touched: Vec<(usize, meshtui_core::Color)> = cut
+        .meshes
+        .iter()
+        .filter_map(|e| {
+            let idx = e
+                .name
+                .as_deref()
+                .and_then(|n| app.scene.meshes.iter().position(|m| m.name == n))?;
+            Some((idx, app.scene.meshes[idx].color))
+        })
+        .collect();
+
+    // Camera: reset to the snapshot, then apply the cut's changes scaled by t.
+    if let Some(cam) = &cut.camera {
+        app.camera.orientation = before.orientation;
+        app.camera.distance = before.distance;
+        app.camera.ortho_scale = before.ortho_scale;
+        let scaled = CameraCut {
+            view: cam.view.clone(),
+            azimuth: cam.azimuth.map(|a| a * t),
+            elevation: cam.elevation.map(|e| e * t),
+            azimuth_to: cam.azimuth_to.map(|a| a * t),
+            elevation_to: cam.elevation_to.map(|e| e * t),
+            up: cam.up,
+            zoom: cam.zoom.map(|z| 1.0 + (z - 1.0) * t),
+            distance: cam
+                .distance
+                .map(|d| before.distance + (d - before.distance) * t),
+            kind: cam.kind.clone(),
+            fov: cam.fov,
+        };
+        let c = cut.clone_with_camera(scaled);
+        apply_cut(app, &c);
+    } else {
+        let c = cut.clone_no_camera();
+        apply_cut(app, &c);
+    }
+
+    // Mesh color/alpha: apply_cut set the absolute end value; lerp from the
+    // snapshot toward it by t so fades/tints are smooth.
+    for (idx, start) in touched {
+        if let Some(entry) = cut
+            .meshes
+            .iter()
+            .find(|e| e.name.as_deref() == Some(app.scene.meshes[idx].name.as_str()))
+        {
+            if entry.color.is_some() || entry.alpha.is_some() {
+                let end = app.scene.meshes[idx].color;
+                let mut c = [0.0; 4];
+                for ch in 0..4 {
+                    c[ch] = start[ch] + (end[ch] - start[ch]) * t;
+                }
+                app.scene.meshes[idx].color = c;
+            }
+        }
+    }
+}
+
+impl Cut {
+    fn clone_with_camera(&self, camera: CameraCut) -> Cut {
+        Cut {
+            camera: Some(camera),
+            ..self.clone_no_camera()
+        }
+    }
+    fn clone_no_camera(&self) -> Cut {
+        Cut {
+            frames: self.frames,
+            tween: self.tween,
+            ease: self.ease.clone(),
+            camera: None,
+            meshes: self.meshes.clone(),
+            light: self.light,
+            wireframe: self.wireframe,
+        }
+    }
+}
+
 /// Apply a mesh cut's fields (only the ones present) to a live mesh.
 fn apply_mesh_cut(mesh: &mut meshtui_core::Mesh, entry: &MeshEntry) {
     if let Some(color) = &entry.color {
@@ -280,6 +446,13 @@ fn composite_frame(mut pixels: Vec<u8>, background: Option<Color>) -> Vec<u8> {
 }
 
 /// Encode the rendered frames as an animated GIF.
+///
+/// GIF has 1-bit alpha, so transparency is binary: pixels with alpha 0 map to
+/// the transparent palette index, anything above renders opaque (composited
+/// over the background). The gif quantizer never assigns the transparent
+/// index on its own, so transparent frames are built by hand. A dissolve-style
+/// fade needs the PNG frames + ffmpeg (palettegen=reserve_transparent with
+/// dithered alpha).
 pub fn encode_gif(anim: &RenderedAnimation, out: &Path) -> Result<(), String> {
     use gif::{Encoder, Frame, Repeat};
     let mut file = std::fs::File::create(out).map_err(|e| e.to_string())?;
@@ -292,14 +465,31 @@ pub fn encode_gif(anim: &RenderedAnimation, out: &Path) -> Result<(), String> {
 
     for raw in &anim.frames {
         let pixels = composite_frame(raw.clone(), anim.background);
-        // Quantize RGBA→indexed. For transparent output, reserve index 0.
         let mut frame = if anim.transparent {
-            Frame::from_rgba_speed(
-                anim.width as u16,
-                anim.height as u16,
-                &mut pixels.clone(),
-                10,
-            )
+            // Quantize the frame as opaque RGB, then move alpha-0 pixels into a
+            // dedicated transparent palette slot (0) so the background shows
+            // through instead of rendering black.
+            let mut rgb: Vec<u8> = Vec::with_capacity(pixels.len() / 4 * 3);
+            for px in pixels.as_chunks::<4>().0 {
+                rgb.extend_from_slice(&px[..3]);
+            }
+            let mut f = Frame::from_rgb_speed(anim.width as u16, anim.height as u16, &rgb, 10);
+            // Prepend a transparent slot; shift existing palette indices by 1.
+            let existing = f.palette.take().unwrap_or_default();
+            let mut palette = vec![0u8, 0, 0];
+            palette.extend_from_slice(&existing);
+            f.palette = Some(palette);
+            let mut buffer = f.buffer.into_owned();
+            for (i, px) in pixels.as_chunks::<4>().0.iter().enumerate() {
+                buffer[i] = if px[3] == 0 {
+                    0
+                } else {
+                    buffer[i].saturating_add(1)
+                };
+            }
+            f.buffer = std::borrow::Cow::Owned(buffer);
+            f.transparent = Some(0);
+            f
         } else {
             let mut rgb: Vec<u8> = Vec::with_capacity(pixels.len() / 4 * 3);
             for px in pixels.as_chunks::<4>().0 {
@@ -308,9 +498,6 @@ pub fn encode_gif(anim: &RenderedAnimation, out: &Path) -> Result<(), String> {
             Frame::from_rgb_speed(anim.width as u16, anim.height as u16, &rgb, 10)
         };
         frame.delay = delay_cs;
-        if anim.transparent {
-            frame.transparent = Some(0);
-        }
         encoder.write_frame(&frame).map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -330,6 +517,7 @@ fn apply_scene_camera(app: &mut App, file: &SceneFile) {
     }
     if let Some(view) = cam.view.as_deref().and_then(meshtui_core::ViewAxis::parse) {
         app.camera.set_view_axis(view);
+        app.base_view = Some(view);
     }
     if cam.azimuth.is_some() || cam.elevation.is_some() {
         headless::apply_headless(
@@ -391,5 +579,28 @@ cuts:
     fn empty_cuts_parse() {
         let anim = parse_str("meshes: [{path: a.ply}]\n").unwrap();
         assert!(anim.cuts.is_empty());
+    }
+
+    #[test]
+    fn cut_parses_tween_ease_and_absolute_camera() {
+        let anim = parse_str(
+            "meshes: [{path: a.ply}]\ncuts:\n  - frames: 10\n    tween: true\n    ease: inout\n    camera: { azimuth_to: 270, zoom: 2 }\n",
+        )
+        .unwrap();
+        let cut = &anim.cuts[0];
+        assert_eq!(cut.tween, Some(true));
+        assert_eq!(cut.ease.as_deref(), Some("inout"));
+        let cam = cut.camera.as_ref().unwrap();
+        assert_eq!(cam.azimuth_to, Some(270.0));
+        assert_eq!(cam.zoom, Some(2.0));
+    }
+
+    #[test]
+    fn ease_curves_endpoints_and_shape() {
+        assert_eq!(ease(None, 0.0), 0.0);
+        assert_eq!(ease(None, 1.0), 1.0);
+        assert!((ease(Some("in"), 0.5) - 0.25).abs() < 1e-6);
+        assert!((ease(Some("out"), 0.5) - 0.75).abs() < 1e-6);
+        assert!((ease(Some("inout"), 0.5) - 0.5).abs() < 1e-6);
     }
 }

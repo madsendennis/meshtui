@@ -185,8 +185,9 @@ struct ScreenshotArgs {
     #[arg(long, value_name = "KIND", value_parser = ["ortho", "persp", "orthographic", "perspective"])]
     camera: Option<String>,
 
-    /// View axis (+x/-x/+y/-y/+z/-z)
-    #[arg(long, value_name = "AXIS", value_parser = parse_view)]
+    /// View axis (+x/-x/+y/-y/+z/-z). Implies a single render unless --views
+    /// is also given. Note: negative axes need = form, e.g. --view=-x
+    #[arg(long, value_name = "AXIS", value_parser = parse_view, allow_hyphen_values = true)]
     view: Option<ViewAxis>,
 
     /// Camera azimuth in degrees around the up axis
@@ -225,9 +226,10 @@ struct ScreenshotArgs {
     #[arg(long, value_name = "COLOR", value_parser = parse_color_flag)]
     background: Option<Color>,
 
-    /// Viewpoint set: "all", "iso", "grid", or "ring:N"
-    #[arg(long, default_value = "all", value_parser = parse_view_set)]
-    views: ViewSet,
+    /// Viewpoint set: "all" (default), "iso", "grid", or "ring:N". A bare
+    /// --view without --views renders just that one view.
+    #[arg(long, value_parser = parse_view_set)]
+    views: Option<ViewSet>,
 
     /// Write files into DIR (created; default: meshtui_views_<timestamp>)
     #[arg(long, value_name = "DIR")]
@@ -371,11 +373,17 @@ fn print_capabilities() {
             "render": {
                 "about": "render a YAML scene file to one PNG",
                 "scene_file": "meshes (path/name/color/alpha/visible/scale/translate), camera, light, wireframe, output (size/background/transparent)",
+                "camera_keys": ["kind", "view", "azimuth", "elevation", "up", "fov", "zoom", "distance"],
+                "camera_note": "camera.distance/zoom are kept across renders; the camera auto-fits once at start and does NOT reframe per frame, so framing is stable across an animation",
             },
             "animate": {
                 "about": "render a base scene + scene cuts to a looping GIF",
-                "cuts": "top level is the scene-file format plus fps/frames/cuts; each cut holds N frames and changes only what it names (camera, per-mesh color/alpha/visible/scale/translate, light, wireframe); state persists across cuts",
-                "frames_dir": "--frames-dir DIR writes numbered PNGs instead of a GIF",
+                "cuts": "top level is the scene-file format plus fps/frames/cuts; each cut holds N frames and changes only what it names; state persists across cuts",
+                "cut_semantics": {
+                    "camera": "RELATIVE deltas that accumulate across cuts: azimuth/elevation add to the pose, zoom multiplies (two cuts of zoom:2 = 4x)",
+                    "meshes": "ABSOLUTE replacement: color/alpha/visible/scale/translate set the value (not a delta); a mesh entry with `path` reloads that mesh's geometry",
+                },
+                "frames_dir": "--frames-dir DIR writes numbered PNGs (combine with -o to also emit the GIF in one render pass)",
             },
         },
         "scene_file_open": "passing a .yaml/.yml as the mesh argument opens that scene in the TUI",
@@ -598,6 +606,7 @@ fn run_animate(
     let frames = rendered.frames.len();
     let fps = rendered.fps;
 
+    // PNG frames (optional) and GIF both come from the same render pass.
     if let Some(dir) = frames_dir {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         let width = frames.to_string().len();
@@ -622,9 +631,13 @@ fn run_animate(
             write_png(&path, &pixels, rendered.width, rendered.height)?;
         }
         println!("wrote {frames} frames to {}", dir.display());
-        return Ok(());
     }
 
+    // GIF unless the caller asked for frames only (no -o and frames-dir set).
+    let want_gif = output.is_some() || frames_dir.is_none();
+    if !want_gif {
+        return Ok(());
+    }
     let out = output
         .map(PathBuf::from)
         .unwrap_or_else(|| file.with_extension("gif"));
@@ -884,6 +897,7 @@ fn run_screenshot(
     config_path: Option<&std::path::Path>,
     opts: &HeadlessOpts,
     set: &ViewSet,
+    single_view: bool,
     out_dir: Option<&std::path::Path>,
     prefix: Option<&str>,
     size: (u32, u32),
@@ -921,6 +935,15 @@ fn run_screenshot(
     if matches!(set, ViewSet::Grid) {
         let path = dir.join(format!("{prefix}_grid.png"));
         write_view_grid(&mut app, &path, size, up, opts)?;
+        println!("{}", path.display());
+        return Ok(());
+    }
+
+    // A single --view without an explicit --views renders just that view
+    // (the camera flags already posed it); no 5 wasted axis renders.
+    if single_view {
+        let path = dir.join(format!("{prefix}.png"));
+        save_shot(&mut app, &path, size, opts)?;
         println!("{}", path.display());
         return Ok(());
     }
@@ -1072,11 +1095,15 @@ fn run(cli: Cli) -> Result<(), String> {
                 }),
                 transparent: false,
             };
+            // --view without an explicit --views means a single render.
+            let views = args.views.clone().unwrap_or(ViewSet::All);
+            let single_view = args.view.is_some() && args.views.is_none();
             return run_screenshot(
                 &args.mesh,
                 args.config.as_deref(),
                 &opts,
-                &args.views,
+                &views,
+                single_view,
                 args.out_dir.as_deref(),
                 args.prefix.as_deref(),
                 args.size,
@@ -1351,7 +1378,7 @@ mod tests {
             Some(Commands::Screenshot(args)) => {
                 assert_eq!(args.mesh.len(), 1);
                 assert_eq!(args.mesh[0].path, "m.ply");
-                assert!(matches!(args.views, ViewSet::Ring(8)));
+                assert!(matches!(args.views, Some(ViewSet::Ring(8))));
                 assert_eq!(args.out_dir, Some(PathBuf::from("/tmp/shots")));
                 assert_eq!(args.prefix.as_deref(), Some("gear"));
                 assert_eq!(args.size, (800, 600));
@@ -1388,7 +1415,7 @@ mod tests {
                 assert_eq!(args.azimuth, Some(45.0));
                 assert_eq!(args.up, Some(glam::Vec3::Z));
                 assert_eq!(args.zoom, Some(0.8));
-                assert!(matches!(args.views, ViewSet::Grid));
+                assert!(matches!(args.views, Some(ViewSet::Grid)));
             }
             other => panic!("expected screenshot, got {other:?}"),
         }
