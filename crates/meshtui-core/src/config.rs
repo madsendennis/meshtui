@@ -106,7 +106,7 @@ pub struct ViewConfig {
 impl Default for ViewConfig {
     fn default() -> Self {
         Self {
-            default_axis: "+y".into(),
+            default_axis: "-y".into(),
             up_vectors: vec![[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
         }
     }
