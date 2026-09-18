@@ -1,10 +1,13 @@
 //! Application state and the dirty-flag event loop.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::{cursor, execute};
 use glam::Vec3;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -79,33 +82,114 @@ struct AnimationState {
     pending_render: bool,
 }
 
-/// One recorded camera pose (the base pose plus one per `q` press).
-struct RecordedPose {
+/// Complete camera state at one stop-motion checkpoint.
+#[derive(Clone, PartialEq)]
+struct RecordedCamera {
     orientation: glam::Quat,
     target: Vec3,
-    /// Ortho scale folded into the distance so the written YAML replays the
-    /// exact framing with the default ortho scale of 1.
     distance: f32,
+    ortho_scale: f32,
     kind: CameraKind,
     fov: f32,
 }
 
-impl RecordedPose {
+impl RecordedCamera {
     fn of(camera: &Camera) -> Self {
         Self {
             orientation: camera.orientation,
             target: camera.target,
-            distance: camera.distance * camera.ortho_scale,
+            distance: camera.distance,
+            ortho_scale: camera.ortho_scale,
             kind: camera.kind,
             fov: camera.fov_degrees,
         }
     }
 }
 
-/// In-progress animation recording: `poses[0]` becomes the scene's base
-/// camera, each later pose one tweened cut.
+/// Complete replayable mesh state at one checkpoint. `record_name` is stable
+/// even when the live scene contains duplicate mesh names.
+#[derive(Clone, PartialEq)]
+struct RecordedMesh {
+    record_name: String,
+    source: Option<std::path::PathBuf>,
+    source_index: Option<usize>,
+    color: meshtui_core::Color,
+    visible: bool,
+}
+
+/// Full stop-motion checkpoint. A `q` records all changes since the previous
+/// mark: camera, mesh membership/visibility/color/alpha, light, and wireframe.
+#[derive(PartialEq)]
+struct RecordedCheckpoint {
+    camera: RecordedCamera,
+    meshes: BTreeMap<u64, RecordedMesh>,
+    light: f32,
+    wireframe: f32,
+}
+
+/// In-progress animation recording. The first checkpoint becomes the base
+/// scene; each later checkpoint becomes one tweened cut.
 struct Recording {
-    poses: Vec<RecordedPose>,
+    checkpoints: Vec<RecordedCheckpoint>,
+    names: BTreeMap<u64, String>,
+    used_names: BTreeSet<String>,
+}
+
+impl Recording {
+    fn new(app: &App) -> Self {
+        let mut recording = Self {
+            checkpoints: Vec::new(),
+            names: BTreeMap::new(),
+            used_names: BTreeSet::new(),
+        };
+        let _ = recording.capture(app);
+        recording
+    }
+
+    fn capture(&mut self, app: &App) -> bool {
+        let mut meshes = BTreeMap::new();
+        for mesh in &app.scene.meshes {
+            let id = mesh.instance_id();
+            let record_name = if let Some(name) = self.names.get(&id) {
+                name.clone()
+            } else {
+                let base = if mesh.name.is_empty() {
+                    "mesh".to_string()
+                } else {
+                    mesh.name.clone()
+                };
+                let mut name = base.clone();
+                let mut suffix = 2usize;
+                while !self.used_names.insert(name.clone()) {
+                    name = format!("{base}_{suffix}");
+                    suffix += 1;
+                }
+                self.names.insert(id, name.clone());
+                name
+            };
+            meshes.insert(
+                id,
+                RecordedMesh {
+                    record_name,
+                    source: mesh.source.clone(),
+                    source_index: mesh.source_index,
+                    color: mesh.color,
+                    visible: mesh.visible,
+                },
+            );
+        }
+        let checkpoint = RecordedCheckpoint {
+            camera: RecordedCamera::of(&app.camera),
+            meshes,
+            light: app.light_scale,
+            wireframe: app.wireframe_thickness,
+        };
+        if self.checkpoints.last() == Some(&checkpoint) {
+            return false;
+        }
+        self.checkpoints.push(checkpoint);
+        true
+    }
 }
 
 /// A finished recording waiting to be rendered. The event loop picks it up
@@ -113,6 +197,7 @@ struct Recording {
 /// (blocking) render runs.
 struct PendingRecordingRender {
     yaml_path: std::path::PathBuf,
+    config: Config,
 }
 
 pub struct App {
@@ -148,13 +233,14 @@ pub struct App {
     pending_zoom: Option<f32>,
     pending_distance: Option<f32>,
     pending_target: Option<Vec3>,
+    pending_ortho_scale: Option<f32>,
     /// When on (default), hiding/showing/deleting/adding meshes reframes the
     /// camera to the visible bounds. Toggle off (`,`) to keep the camera
     /// distance constant — e.g. while stepping meshes for an animation.
     auto_zoom: bool,
-    /// Animation recording in progress: double-tap the quit key starts it,
-    /// each further quit-key press adds a camera cut, and the record-stop
-    /// key (`Q`) asks for the GIF duration and writes the animation file.
+    /// Animation recording in progress: double-tap the record key starts it,
+    /// each further press adds a full-state checkpoint, and the record-stop
+    /// key asks for the GIF duration and writes the animation file.
     recording: Option<Recording>,
     /// Finished recording queued for PNG+GIF rendering (see the event loop).
     pending_recording_render: Option<PendingRecordingRender>,
@@ -162,6 +248,12 @@ pub struct App {
     /// record key again starts a recording, anything else clears it (and, on
     /// legacy configs where record shares the quit key, quits).
     pending_record: bool,
+    /// Legacy terminals report auto-repeat as presses. A short double-tap
+    /// window distinguishes intentional `qq` from a held record key.
+    pending_record_at: Option<Instant>,
+    /// After a timed-out double tap, ignore record-key presses until another
+    /// key arrives; this prevents the repeat stream from forming a new pair.
+    record_key_blocked: bool,
     dirty: bool,
     render_dirty: bool,
 }
@@ -273,9 +365,12 @@ impl App {
             pending_zoom: None,
             pending_distance: None,
             pending_target: None,
+            pending_ortho_scale: None,
             recording: None,
             pending_recording_render: None,
             pending_record: false,
+            pending_record_at: None,
+            record_key_blocked: false,
             auto_zoom: true,
             dirty: true,
             render_dirty: true,
@@ -315,6 +410,9 @@ impl App {
         if let Some(target) = self.pending_target.take() {
             self.camera.target = target;
         }
+        if let Some(scale) = self.pending_ortho_scale.take() {
+            self.camera.ortho_scale = scale.clamp(0.01, 100.0);
+        }
         self.render_dirty = true;
     }
 
@@ -327,6 +425,7 @@ impl App {
         zoom: Option<f32>,
         distance: Option<f32>,
         target: Option<Vec3>,
+        ortho_scale: Option<f32>,
     ) {
         if self.aspect >= 0.0 {
             if let Some(zoom) = zoom {
@@ -338,10 +437,14 @@ impl App {
             if let Some(target) = target {
                 self.camera.target = target;
             }
+            if let Some(scale) = ortho_scale {
+                self.camera.ortho_scale = scale.clamp(0.01, 100.0);
+            }
         } else {
             self.pending_zoom = zoom;
             self.pending_distance = distance;
             self.pending_target = target;
+            self.pending_ortho_scale = ortho_scale;
         }
     }
 
@@ -436,17 +539,29 @@ impl App {
             .key("anim_record")
             .map(|k| normalize_key(&k).to_string())
             .unwrap_or_else(|| "q".into());
-        let stop_key = self
-            .config
-            .key("anim_record_stop")
-            .map(|k| normalize_key(&k).to_string())
-            .unwrap_or_else(|| "Q".into());
+        let is_record_key = self.key_matches_action("anim_record", key);
+        let is_stop_key = self.key_matches_action("anim_record_stop", key);
+        if !is_record_key {
+            self.record_key_blocked = false;
+        }
         let shared_quit = quit_key == record_key;
         if self.pending_record {
             self.pending_record = false;
+            let pending_at = self.pending_record_at.take();
             self.status_message = None;
-            if key == record_key {
-                self.start_recording();
+            if is_record_key {
+                if !self.record_key_blocked
+                    && pending_at
+                        .is_some_and(|started| started.elapsed() <= Duration::from_millis(300))
+                {
+                    self.start_recording();
+                } else {
+                    self.record_key_blocked = true;
+                    self.status_message = Some(format!(
+                        "double-tap {} to start recording",
+                        key_label(&record_key)
+                    ));
+                }
                 self.dirty = true;
                 return false;
             }
@@ -459,11 +574,15 @@ impl App {
             }
             // Dedicated record key: fall through so the key works normally.
         }
-        if key == record_key {
+        if is_record_key {
+            if self.record_key_blocked {
+                return false;
+            }
             if self.recording.is_some() {
                 self.record_cut();
             } else {
                 self.pending_record = true;
+                self.pending_record_at = Some(Instant::now());
                 self.status_message = Some(format!(
                     "press {} again to start recording",
                     key_label(&record_key),
@@ -473,7 +592,7 @@ impl App {
             return false;
         }
         if self.recording.is_some() {
-            if key == stop_key {
+            if is_stop_key {
                 self.modal = Some(Modal::GifDuration {
                     input: String::new(),
                     error: None,
@@ -503,17 +622,24 @@ impl App {
     }
 
     fn action_for_key(&self, key: &str) -> Option<String> {
-        self.config.keybindings.iter().find_map(|(action, value)| {
-            let matches = match value {
-                toml::Value::String(s) => normalize_key(s) == key,
-                toml::Value::Array(a) => a
-                    .iter()
-                    .filter_map(|v| v.as_str())
-                    .any(|v| normalize_key(v) == key),
-                _ => false,
-            };
-            matches.then_some(action.clone())
+        self.config.keybindings.keys().find_map(|action| {
+            self.key_matches_action(action, key)
+                .then_some(action.clone())
         })
+    }
+
+    fn key_matches_action(&self, action: &str, key: &str) -> bool {
+        self.config
+            .keybindings
+            .get(action)
+            .is_some_and(|value| match value {
+                toml::Value::String(binding) => normalize_key(binding) == key,
+                toml::Value::Array(bindings) => bindings
+                    .iter()
+                    .filter_map(|binding| binding.as_str())
+                    .any(|binding| normalize_key(binding) == key),
+                _ => false,
+            })
     }
 
     fn execute_action(&mut self, action: &str) -> bool {
@@ -867,6 +993,7 @@ impl App {
                                     // the (blocking) render runs.
                                     self.pending_recording_render = Some(PendingRecordingRender {
                                         yaml_path: path.clone(),
+                                        config: self.config.clone(),
                                     });
                                     self.status_message = Some(format!(
                                         "wrote {} — rendering frames + GIF…",
@@ -874,10 +1001,13 @@ impl App {
                                     ));
                                 }
                                 Err(e) => {
-                                    self.status_message = Some(format!("recording failed: {e}"));
+                                    *error = Some(format!("recording failed: {e}"));
+                                    keep_open = true;
                                 }
                             }
-                            keep_open = false;
+                            if self.pending_recording_render.is_some() {
+                                keep_open = false;
+                            }
                         }
                         _ => *error = Some("Enter a duration in seconds (0.1-600)".into()),
                     }
@@ -1049,39 +1179,47 @@ impl App {
     }
 
     /// Start an animation recording: the current camera pose becomes the
-    /// scene's base camera, each later quit-key press adds one cut.
+    /// scene's base state, each later record-key press adds one full cut.
     fn start_recording(&mut self) {
-        self.recording = Some(Recording {
-            poses: vec![RecordedPose::of(&self.camera)],
-        });
+        self.recording = Some(Recording::new(self));
         let record_key = self.config.key("anim_record").unwrap_or_else(|| "q".into());
         let stop_key = self
             .config
             .key("anim_record_stop")
             .unwrap_or_else(|| "Q".into());
         self.status_message = Some(format!(
-            "recording animation — {} adds a cut per camera move, {} finishes, esc cancels",
+            "recording animation — {} adds a full-state checkpoint, {} finishes, esc cancels",
             key_label(&record_key),
             key_label(&stop_key),
         ));
     }
 
-    /// Append the current camera pose as one cut to the recording.
+    /// Append the complete current state as one cut to the recording.
     fn record_cut(&mut self) {
-        if let Some(rec) = &mut self.recording {
-            rec.poses.push(RecordedPose::of(&self.camera));
-            self.status_message = Some(format!("recorded cut {}", rec.poses.len() - 1));
+        if let Some(mut recording) = self.recording.take() {
+            let changed = recording.capture(self);
+            let cuts = recording.checkpoints.len() - 1;
+            self.recording = Some(recording);
+            self.status_message = Some(if changed {
+                format!("recorded checkpoint {cuts}")
+            } else {
+                "no changes since the previous checkpoint".into()
+            });
         }
     }
 
-    /// Write the recording as an animation YAML: base scene (meshes with
-    /// current colors/visibility, camera = first pose) plus one tweened cut
-    /// per recorded pose. Returns the status message.
+    /// Write the full stop-motion checkpoints as animation YAML.
     fn finish_recording(&mut self, seconds: f32, path: &std::path::Path) -> Result<String, String> {
-        let rec = self.recording.take().ok_or("not recording")?;
-        let yaml = recording_yaml(self, &rec, seconds)?;
-        std::fs::write(path, &yaml).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-        let cuts = rec.poses.len().saturating_sub(1).max(1);
+        let rec = self.recording.as_ref().ok_or("not recording")?;
+        let yaml = recording_yaml(self, rec, seconds)?;
+        let tmp = path.with_extension("yaml.tmp");
+        std::fs::write(&tmp, &yaml).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+        if let Err(error) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("cannot publish {}: {error}", path.display()));
+        }
+        let cuts = rec.checkpoints.len().saturating_sub(1).max(1);
+        self.recording = None;
         Ok(format!(
             "wrote {} ({cuts} cuts, ~{seconds:.1}s)",
             path.display(),
@@ -1107,7 +1245,11 @@ impl App {
                 min,
                 max,
                 self.config.camera.distance_padding,
-                self.aspect.max(1.0),
+                if self.aspect.is_finite() && self.aspect > 0.0 {
+                    self.aspect
+                } else {
+                    1.0
+                },
             );
         }
     }
@@ -1423,7 +1565,7 @@ impl App {
             };
             let fit = if self.auto_zoom { "" } else { " | fit:manual" };
             let recording = match &self.recording {
-                Some(rec) => format!(" | REC {} cuts", rec.poses.len() - 1),
+                Some(rec) => format!(" | REC {} cuts", rec.checkpoints.len() - 1),
                 None => String::new(),
             };
             let quit = key_label(&self.config.key("quit").unwrap_or_else(|| "esc".into()));
@@ -2004,10 +2146,19 @@ fn draw_open_modal(f: &mut TuiFrame, theme: Theme, input: &str, error: Option<&s
 
 /// Run the event-driven TUI.
 pub fn run(mut app: App) -> io::Result<()> {
+    let mut keyboard_out = io::stdout();
+    let _ = execute!(
+        keyboard_out,
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+        )
+    );
     let mut terminal = ratatui::init();
     let result = event_loop(&mut app, &mut terminal);
     // Always clear the kitty image and restore the terminal.
     let mut out = io::stdout();
+    let _ = execute!(out, PopKeyboardEnhancementFlags);
     let _ = write!(out, "{}", delete_image(IMAGE_ID));
     let _ = out.flush();
     ratatui::restore();
@@ -2033,6 +2184,13 @@ fn event_loop(app: &mut App, terminal: &mut DefaultTerminal) -> io::Result<()> {
                     ) =>
                 {
                     if let Some(key) = App::key_to_string(&ev) {
+                        if ev.kind == event::KeyEventKind::Repeat
+                            && ["anim_record", "anim_record_stop"]
+                                .iter()
+                                .any(|action| app.key_matches_action(action, &key))
+                        {
+                            continue;
+                        }
                         if app.handle_key(&key) {
                             return Ok(());
                         }
@@ -2110,6 +2268,7 @@ fn event_loop(app: &mut App, terminal: &mut DefaultTerminal) -> io::Result<()> {
                 Err(e) => format!("render failed: {e} (the YAML file is still there)"),
             });
             app.dirty = true;
+            continue;
         }
 
         // Poll often enough for either live theme changes or animation.
@@ -2200,12 +2359,12 @@ fn pixel_size(app: &App, total_cols: u32, total_rows: u32, vw: u32, vh: u32) -> 
     )
 }
 
-/// Build the animation YAML for a finished recording: the base scene
-/// (meshes with their current color/alpha/visibility, camera = first
-/// recorded pose) plus one tweened cut per later pose.
+/// Build the animation YAML for a finished recording. The base scene contains
+/// the union of every mesh ever captured (later additions start hidden), and
+/// each `q` checkpoint writes the complete state delta since the previous one.
 fn recording_yaml(app: &App, rec: &Recording, seconds: f32) -> Result<String, String> {
     let mut out = String::from(
-        "# Recorded in the meshtui TUI: one tweened cut per camera move.\n\
+        "# Recorded in the meshtui TUI: one full-state checkpoint per q press.\n\
          # Replay: meshtui animate <this file> -o out.gif\n",
     );
     // Size follows the current viewport aspect at a sane default width.
@@ -2218,64 +2377,152 @@ fn recording_yaml(app: &App, rec: &Recording, seconds: f32) -> Result<String, St
     let h = ((w as f32 / aspect).round() as u32).clamp(1, 4096);
     out.push_str(&format!("size: [{w}, {h}]\ntransparent: true\n"));
 
-    // Even hold per cut so the total runtime approximates `seconds`.
-    let ncuts = rec.poses.len().saturating_sub(1).max(1);
-    const FPS: u32 = 30;
-    let hold = ((FPS as f32 * seconds) / ncuts as f32).round().max(1.0) as u32;
-    out.push_str(&format!("fps: {FPS}\nframes: {hold}\n"));
+    let segments = rec.checkpoints.len().saturating_sub(1).max(1);
+    let (fps, frame_counts) = recording_frame_counts(segments, seconds)?;
+    out.push_str(&format!("fps: {fps}\nduration: {}\n", fmt_f32(seconds)));
 
-    out.push_str("meshes:\n");
-    for mesh in &app.scene.meshes {
+    // Union in first-appearance order. Added meshes are available from frame
+    // zero but hidden until their checkpoint; deleted meshes become hidden
+    // instead of disappearing from earlier checkpoints.
+    let mut union: BTreeMap<u64, RecordedMesh> = BTreeMap::new();
+    for checkpoint in &rec.checkpoints {
+        for (&id, mesh) in &checkpoint.meshes {
+            union.entry(id).or_insert_with(|| mesh.clone());
+        }
+    }
+    if union.is_empty() {
+        out.push_str("meshes: []\n");
+    } else {
+        out.push_str("meshes:\n");
+    }
+    let initial = &rec.checkpoints[0];
+    for (&id, mesh) in &union {
         let source = mesh.source.as_deref().ok_or_else(|| {
             format!(
                 "mesh {:?} has no source file; cannot record the scene",
-                mesh.name
+                mesh.record_name
             )
         })?;
+        let initial_mesh = initial.meshes.get(&id);
         out.push_str(&format!(
             "  - {{ path: {}, name: {}, color: \"{}\"",
             yaml_str(&source.display().to_string()),
-            yaml_str(&mesh.name),
-            color_hex(mesh.color),
+            yaml_str(&mesh.record_name),
+            color_hex(initial_mesh.map_or(mesh.color, |m| m.color)),
         ));
-        if !mesh.visible {
+        if let Some(index) = mesh.source_index {
+            out.push_str(&format!(", source_index: {index}"));
+        }
+        if !initial_mesh.is_some_and(|m| m.visible) {
             out.push_str(", visible: false");
         }
         out.push_str(" }\n");
     }
 
-    let base = &rec.poses[0];
+    let base = &initial.camera;
     out.push_str("camera:\n");
     out.push_str(&format!("  kind: {}\n", kind_name(base.kind)));
     out.push_str(&format!("  fov: {}\n", fmt_f32(base.fov)));
     out.push_str(&format!("  orientation: {}\n", quat_yaml(base.orientation)));
     out.push_str(&format!("  target: {}\n", vec3_yaml(base.target)));
     out.push_str(&format!("  distance: {}\n", fmt_f32(base.distance)));
+    out.push_str(&format!("  ortho_scale: {}\n", fmt_f32(base.ortho_scale)));
+    out.push_str(&format!("light: {}\n", fmt_f32(initial.light)));
+    out.push_str(&format!("wireframe: {}\n", fmt_f32(initial.wireframe)));
 
     out.push_str("cuts:\n");
-    if rec.poses.len() == 1 {
-        // No camera moves recorded: hold the base pose for the duration.
-        out.push_str("  - {}\n");
+    if rec.checkpoints.len() == 1 {
+        out.push_str(&format!("  - {{ frames: {} }}\n", frame_counts[0]));
     }
-    for (i, pose) in rec.poses.iter().enumerate().skip(1) {
-        let prev = &rec.poses[i - 1];
-        out.push_str("  - tween: true\n    ease: inout\n    camera:\n");
+    for (segment, checkpoint) in rec.checkpoints.iter().enumerate().skip(1) {
+        let prev = &rec.checkpoints[segment - 1];
+        let pose = &checkpoint.camera;
+        let prev_pose = &prev.camera;
+        out.push_str(&format!(
+            "  - frames: {}\n    tween: true\n    ease: inout\n    camera:\n",
+            frame_counts[segment - 1]
+        ));
         out.push_str(&format!(
             "      orientation: {}\n",
             quat_yaml(pose.orientation)
         ));
         out.push_str(&format!("      target: {}\n", vec3_yaml(pose.target)));
         out.push_str(&format!("      distance: {}\n", fmt_f32(pose.distance)));
-        // Projection only changes on deliberate key presses; record the
-        // change so the replay follows it.
-        if pose.kind != prev.kind {
+        out.push_str(&format!(
+            "      ortho_scale: {}\n",
+            fmt_f32(pose.ortho_scale)
+        ));
+        if pose.kind != prev_pose.kind {
             out.push_str(&format!("      kind: {}\n", kind_name(pose.kind)));
         }
-        if (pose.fov - prev.fov).abs() > 1e-3 {
+        if (pose.fov - prev_pose.fov).abs() > 1e-3 {
             out.push_str(&format!("      fov: {}\n", fmt_f32(pose.fov)));
+        }
+
+        let mut mesh_lines = Vec::new();
+        for (&id, union_mesh) in &union {
+            let before = prev.meshes.get(&id);
+            let after = checkpoint.meshes.get(&id);
+            let before_visible = before.is_some_and(|m| m.visible);
+            let after_visible = after.is_some_and(|m| m.visible);
+            let color_changed = match (before, after) {
+                (Some(a), Some(b)) => a.color != b.color,
+                (None, Some(_)) => true,
+                _ => false,
+            };
+            if before_visible == after_visible && !color_changed {
+                continue;
+            }
+            let mut line = format!("      - {{ name: {}", yaml_str(&union_mesh.record_name));
+            if let Some(after) = after {
+                if color_changed {
+                    line.push_str(&format!(", color: \"{}\"", color_hex(after.color)));
+                }
+            }
+            if before_visible != after_visible {
+                line.push_str(&format!(", visible: {after_visible}"));
+            }
+            line.push_str(" }");
+            mesh_lines.push(line);
+        }
+        if !mesh_lines.is_empty() {
+            out.push_str("    meshes:\n");
+            for line in mesh_lines {
+                out.push_str(&line);
+                out.push('\n');
+            }
+        }
+        if (checkpoint.light - prev.light).abs() > 1e-6 {
+            out.push_str(&format!("    light: {}\n", fmt_f32(checkpoint.light)));
+        }
+        if (checkpoint.wireframe - prev.wireframe).abs() > 1e-6 {
+            out.push_str(&format!(
+                "    wireframe: {}\n",
+                fmt_f32(checkpoint.wireframe)
+            ));
         }
     }
     Ok(out)
+}
+
+/// Choose an exact total frame budget and distribute it across checkpoints.
+/// FPS rises (up to 60) when many checkpoints must fit a short duration.
+fn recording_frame_counts(segments: usize, seconds: f32) -> Result<(u32, Vec<u32>), String> {
+    let needed_fps = (segments as f32 / seconds).ceil() as u32;
+    let fps = 20u32.max(needed_fps).min(60);
+    let total = (seconds * fps as f32).round() as usize;
+    if total < segments {
+        return Err(format!(
+            "{seconds:.2}s is too short for {segments} cuts; use at least {:.2}s",
+            segments as f32 / 60.0
+        ));
+    }
+    let base = total / segments;
+    let extra = total % segments;
+    let frames = (0..segments)
+        .map(|i| (base + usize::from(i < extra)) as u32)
+        .collect();
+    Ok((fps, frames))
 }
 
 /// Single-quoted YAML string (only ' needs escaping).
@@ -2334,34 +2581,21 @@ fn vec3_yaml(v: Vec3) -> String {
 /// Render a finished recording to PNG frames plus a GIF, next to the YAML.
 fn render_recording(job: &PendingRecordingRender) -> Result<String, String> {
     let anim = crate::animate::load(&job.yaml_path)?;
-    let rendered = crate::animate::render(&anim, None, None)?;
-    let frame_count = rendered.frames.len();
-    let fps = rendered.fps;
-
     let stem = job
         .yaml_path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("meshtui_anim");
     let dir = job.yaml_path.with_file_name(format!("{stem}_frames"));
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let width = frame_count.to_string().len();
-    for (i, raw) in rendered.frames.iter().enumerate() {
-        let pixels = crate::animate::composite_frame(raw.clone(), rendered.background);
-        let path = dir.join(format!("frame_{i:0width$}.png"));
-        image::write_buffer_with_format(
-            &mut std::io::BufWriter::new(std::fs::File::create(&path).map_err(|e| e.to_string())?),
-            &pixels,
-            rendered.width,
-            rendered.height,
-            image::ColorType::Rgba8,
-            image::ImageFormat::Png,
-        )
-        .map_err(|e| e.to_string())?;
-    }
-
     let gif_path = job.yaml_path.with_extension("gif");
-    crate::animate::encode_gif(&rendered, &gif_path)?;
+    let (frame_count, fps) = crate::animate::encode_outputs_streaming(
+        &anim,
+        job.config.clone(),
+        None,
+        Some(&dir),
+        Some(&gif_path),
+    )?;
+
     Ok(format!(
         "rendered {} ({} frames @ {} fps) + {}",
         gif_path.display(),
@@ -2839,12 +3073,58 @@ mod tests {
                 .contains("recording"),
             "recording announces itself"
         );
+        app.handle_key("q");
+        assert_eq!(
+            app.recording.as_ref().unwrap().checkpoints.len(),
+            1,
+            "auto-repeat cannot add unchanged checkpoints"
+        );
         assert!(!app.handle_key("escape"), "escape cancels, does not quit");
         assert!(app.recording.is_none());
         assert_eq!(app.status_message.as_deref(), Some("recording cancelled"));
 
         // esc quits when not recording.
         assert!(app.handle_key("escape"));
+    }
+
+    #[test]
+    fn all_configured_record_keys_are_supported() {
+        let mut config = Config::default();
+        config.keybindings.insert(
+            "anim_record".into(),
+            toml::Value::Array(vec![
+                toml::Value::String("q".into()),
+                toml::Value::String("f12".into()),
+            ]),
+        );
+        let mut scene = Scene::new();
+        scene.meshes.push(triangle_at("mesh", Vec3::ZERO, 1.0));
+        let mut app = App::new(scene, config);
+
+        app.handle_key("f12");
+        app.handle_key("f12");
+        assert!(app.recording.is_some());
+    }
+
+    #[test]
+    fn held_record_key_cannot_satisfy_a_timed_out_double_tap() {
+        let mut scene = Scene::new();
+        scene.meshes.push(triangle_at("mesh", Vec3::ZERO, 1.0));
+        let mut app = App::new(scene, Config::default());
+
+        app.handle_key("q");
+        app.pending_record_at = Some(Instant::now() - Duration::from_secs(1));
+        app.handle_key("q");
+        assert!(app.recording.is_none());
+        assert!(app.record_key_blocked);
+        app.handle_key("q");
+        assert!(app.recording.is_none(), "repeat stream stays blocked");
+
+        app.handle_key("j");
+        assert!(!app.record_key_blocked);
+        app.handle_key("q");
+        app.handle_key("q");
+        assert!(app.recording.is_some());
     }
 
     #[test]
@@ -2917,8 +3197,13 @@ mod tests {
             "base camera is the pose at recording start"
         );
         assert!(anim.cuts[1].camera.as_ref().unwrap().orientation.is_some());
-        assert_eq!(anim.fps, Some(30));
-        assert_eq!(anim.frames, Some(60), "4s * 30fps / 2 cuts = 60 hold");
+        assert_eq!(anim.fps, Some(20));
+        assert_eq!(anim.duration, Some(4.0));
+        assert_eq!(
+            anim.cuts[0].frames,
+            Some(40),
+            "4s * 20fps / 2 cuts = 40 hold"
+        );
         let scene = anim.scene.build_scene().unwrap();
         assert_eq!(scene.meshes.len(), 1);
         assert!(
@@ -2927,6 +3212,139 @@ mod tests {
             scene.meshes[0].color
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn recording_captures_complete_checkpoint_state() {
+        let dir = std::env::temp_dir().join(format!(
+            "meshtui_full_rec_{}_{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let stl = dir.join("tri.stl");
+        std::fs::write(
+            &stl,
+            "solid s\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\n\
+             vertex 0 1 0\nendloop\nendfacet\nendsolid s\n",
+        )
+        .unwrap();
+
+        let mut app = app_with_meshes(&["mesh"]);
+        app.scene.meshes[0].source = Some(stl.clone());
+        app.scene.meshes[0].source_index = Some(0);
+        app.start_recording();
+
+        app.scene.meshes[0].color = [1.0, 0.0, 0.0, 0.5];
+        app.light_scale = 1.75;
+        app.wireframe_thickness = 2.0;
+        app.camera.orbit(0.2, -0.1);
+        app.camera.ortho_scale = 3.5;
+        let mut added = triangle_at("mesh", Vec3::X * 2.0, 1.0);
+        added.source = Some(stl);
+        added.source_index = Some(0);
+        added.color = [0.0, 0.0, 1.0, 0.25];
+        app.scene.meshes.push(added);
+        app.record_cut();
+
+        let removed = app.scene.meshes.remove(0);
+        app.scene.meshes[0].visible = false;
+        app.record_cut();
+
+        app.scene.meshes.insert(0, removed);
+        app.record_cut();
+
+        let yaml = recording_yaml(&app, app.recording.as_ref().unwrap(), 1.0).unwrap();
+        let mut anim = crate::animate::parse_str(&yaml).unwrap();
+        assert_eq!(anim.scene.meshes.len(), 2);
+        assert_eq!(anim.scene.meshes[0].name.as_deref(), Some("mesh"));
+        assert_eq!(anim.scene.meshes[1].name.as_deref(), Some("mesh_2"));
+        assert_eq!(anim.scene.meshes[0].source_index, Some(0));
+        assert_eq!(anim.scene.meshes[1].visible, Some(false));
+        assert_eq!(anim.cuts.len(), 3);
+        assert_eq!(anim.cuts[0].light, Some(1.75));
+        assert_eq!(anim.cuts[0].wireframe, Some(2.0));
+        assert_eq!(anim.cuts[0].camera.as_ref().unwrap().ortho_scale, Some(3.5));
+
+        fn find_mesh<'a>(
+            cut: &'a crate::animate::Cut,
+            name: &str,
+        ) -> &'a meshtui_core::scene_file::MeshEntry {
+            cut.meshes
+                .iter()
+                .find(|mesh| mesh.name.as_deref() == Some(name))
+                .unwrap()
+        }
+        let first_mesh = find_mesh(&anim.cuts[0], "mesh");
+        assert!((first_mesh.color.as_ref().unwrap().0[3] - 0.5).abs() < 1.0 / 255.0);
+        assert_eq!(find_mesh(&anim.cuts[0], "mesh_2").visible, Some(true));
+        assert_eq!(find_mesh(&anim.cuts[1], "mesh").visible, Some(false));
+        assert_eq!(find_mesh(&anim.cuts[1], "mesh_2").visible, Some(false));
+        assert_eq!(find_mesh(&anim.cuts[2], "mesh").visible, Some(true));
+
+        anim.scene.output.size = Some([16, 16]);
+        for cut in &mut anim.cuts {
+            cut.frames = Some(1);
+        }
+        let frames_dir = dir.join("frames");
+        std::fs::create_dir(&frames_dir).unwrap();
+        std::fs::write(frames_dir.join("frame_9999.png"), b"stale").unwrap();
+        std::fs::write(frames_dir.join("keep.txt"), b"keep").unwrap();
+        let gif = dir.join("recording.gif");
+        let (frames, _) = crate::animate::encode_outputs_streaming(
+            &anim,
+            Config::default(),
+            None,
+            Some(&frames_dir),
+            Some(&gif),
+        )
+        .unwrap();
+        assert_eq!(frames, 3);
+        assert!(gif.is_file());
+        assert!(!frames_dir.join("frame_9999.png").exists());
+        assert!(frames_dir.join("keep.txt").is_file());
+        assert_eq!(std::fs::read_dir(&frames_dir).unwrap().count(), 4);
+
+        let nested_frames = dir.join("new/nested/frames");
+        crate::animate::encode_outputs_streaming(
+            &anim,
+            Config::default(),
+            None,
+            Some(&nested_frames),
+            None,
+        )
+        .unwrap();
+        assert!(nested_frames.join("frame_0000.png").is_file());
+
+        let invalid_frames_dir = dir.join("not_a_directory");
+        std::fs::write(&invalid_frames_dir, b"file").unwrap();
+        let rollback_gif = dir.join("rollback.gif");
+        std::fs::write(&rollback_gif, b"old gif").unwrap();
+        assert!(crate::animate::encode_outputs_streaming(
+            &anim,
+            Config::default(),
+            None,
+            Some(&invalid_frames_dir),
+            Some(&rollback_gif),
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&rollback_gif).unwrap(), b"old gif");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn default_view_orbits_around_non_collinear_up_axis() {
+        let mut scene = Scene::new();
+        scene.meshes.push(triangle_at("mesh", Vec3::ZERO, 1.0));
+        let mut app = App::new(scene, Config::default());
+        let before = app.camera.position();
+        app.execute_action("orbit_left");
+        assert!(
+            app.camera.position().distance(before) > 1e-3,
+            "default +Z view with Y-up must respond to azimuth"
+        );
     }
 
     #[test]

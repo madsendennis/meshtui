@@ -203,7 +203,7 @@ pub fn apply_headless_pose(app: &mut App, opts: &HeadlessOpts) {
 /// overrides. Run AFTER `App::set_aspect` — the fit resets distance and
 /// ortho_scale, so applying zoom before it would silently cancel it.
 pub fn apply_headless_post(app: &mut App, opts: &HeadlessOpts) {
-    app.apply_post_fit_camera(opts.zoom, opts.distance, None);
+    app.apply_post_fit_camera(opts.zoom, opts.distance, None, None);
     if let Some(light) = opts.light {
         app.set_light_scale(light);
     }

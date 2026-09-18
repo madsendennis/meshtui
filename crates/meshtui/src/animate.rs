@@ -59,6 +59,9 @@ pub struct AnimFile {
     pub fps: Option<u32>,
     /// Default hold (frames) for a cut that omits `frames`.
     pub frames: Option<u32>,
+    /// Optional exact GIF playback duration in seconds. Frame rendering still
+    /// uses `fps`; GIF delays are distributed to preserve this duration.
+    pub duration: Option<f32>,
     pub cuts: Vec<Cut>,
 }
 
@@ -103,6 +106,9 @@ pub struct CameraCut {
     pub orientation: Option<[f32; 4]>,
     /// Absolute: exact look-at target. Tweens linearly.
     pub target: Option<[f32; 3]>,
+    /// Absolute orthographic scale. Tweens linearly and remains independent
+    /// of camera distance.
+    pub ortho_scale: Option<f32>,
 }
 
 /// Top-level keys an animation file accepts (the SceneFile keys plus the
@@ -119,6 +125,7 @@ const ANIM_TOP_LEVEL_KEYS: &[&str] = &[
     "transparent",
     "fps",
     "frames",
+    "duration",
     "cuts",
 ];
 
@@ -139,6 +146,12 @@ pub fn parse_str(text: &str) -> Result<AnimFile, String> {
     // The flattened SceneFile doesn't fold its flat output keys when embedded
     // via #[serde(flatten)], so do it here.
     anim.scene.fold_output();
+    if anim
+        .duration
+        .is_some_and(|duration| !duration.is_finite() || !(0.01..=600.0).contains(&duration))
+    {
+        return Err("duration must be a finite number from 0.01 to 600 seconds".into());
+    }
     for (i, cut) in anim.cuts.iter().enumerate() {
         if let Some(ease) = cut.ease.as_deref() {
             if !matches!(ease, "linear" | "in" | "out" | "inout") {
@@ -157,30 +170,65 @@ pub fn load(path: &Path) -> Result<AnimFile, String> {
     parse_str(&text)
 }
 
-/// Rendered animation ready to encode.
-pub struct RenderedAnimation {
-    pub frames: Vec<Vec<u8>>,
+/// Frame-independent output metadata.
+#[derive(Debug, Clone)]
+pub struct RenderMetadata {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
     pub background: Option<Color>,
     pub transparent: bool,
+    total_frames: usize,
+    duration_centiseconds: Option<usize>,
 }
 
-/// Render every frame of an animation. Camera/mesh state persists across
-/// cuts (each cut only changes what it names).
-pub fn render(
-    anim: &AnimFile,
-    config_path: Option<&Path>,
-    size_override: Option<(u32, u32)>,
-) -> Result<RenderedAnimation, String> {
-    let scene: Scene = anim.scene.build_scene().map_err(|e| e.to_string())?;
-    let config = Config::load_effective(config_path).map_err(|e| e.to_string())?;
-    let mut app = App::new(scene, config);
-
-    let (w, h) = size_override
+/// Resolve output metadata without rendering or allocating frame buffers.
+pub fn metadata(anim: &AnimFile, size_override: Option<(u32, u32)>) -> RenderMetadata {
+    let (width, height) = size_override
         .or_else(|| anim.scene.output.size.map(|[a, b]| (a, b)))
         .unwrap_or((800, 600));
+    let transparent = anim.scene.output.transparent.unwrap_or(false);
+    let total_frames = anim
+        .cuts
+        .iter()
+        .map(|cut| cut.frames.unwrap_or(anim.frames.unwrap_or(1).max(1)).max(1) as usize)
+        .sum();
+    RenderMetadata {
+        width,
+        height,
+        fps: anim.fps.unwrap_or(12).clamp(1, 60),
+        background: if transparent {
+            None
+        } else {
+            anim.scene.output.background.as_ref().map(|c| c.0)
+        },
+        transparent,
+        total_frames,
+        duration_centiseconds: anim
+            .duration
+            .map(|duration| (duration * 100.0).round() as usize),
+    }
+}
+
+/// Render frames one at a time. The callback must consume/copy each frame
+/// before returning; this keeps memory bounded for long animations.
+pub(crate) fn render_each_with_config<F>(
+    anim: &AnimFile,
+    config: Config,
+    size_override: Option<(u32, u32)>,
+    mut emit: F,
+) -> Result<RenderMetadata, String>
+where
+    F: FnMut(usize, &[u8], &RenderMetadata) -> Result<(), String>,
+{
+    let scene: Scene = anim
+        .scene
+        .build_scene_allow_empty()
+        .map_err(|e| e.to_string())?;
+    let mut app = App::new(scene, config);
+
+    let meta = metadata(anim, size_override);
+    let (w, h) = (meta.width, meta.height);
     // Pose first (kind/fov/up/view/azimuth/elevation — the fit must use the
     // final projection), then the one-time auto-fit (which sets
     // distance/ortho_scale from that pose), then zoom/distance so the fit
@@ -189,10 +237,9 @@ pub fn render(
     app.set_aspect(w as f32 / h as f32);
     crate::apply_scene_camera_post(&mut app, &anim.scene);
 
-    let fps = anim.fps.unwrap_or(12).clamp(1, 60);
     let default_frames = anim.frames.unwrap_or(1).max(1);
-    let mut frames = Vec::new();
     let mut state = AnimState::of(&app.scene);
+    let mut frame_index = 0usize;
 
     for (i, cut) in anim.cuts.iter().enumerate() {
         let hold = cut.frames.unwrap_or(default_frames).max(1);
@@ -214,28 +261,18 @@ pub fn render(
             } else if f == 0 {
                 apply_cut(&mut app, cut, &mut state).map_err(|e| format!("cut {i}: {e}"))?;
             }
-            let frame = app
+            let pixels = app
                 .render_frame(w, h)
-                .ok_or_else(|| format!("cut {i}: nothing to render (all meshes hidden)"))?;
-            frames.push(frame.pixels);
+                .map(|frame| frame.pixels)
+                .unwrap_or_else(|| vec![0; w as usize * h as usize * 4]);
+            emit(frame_index, &pixels, &meta)?;
+            frame_index += 1;
         }
     }
-    if frames.is_empty() {
+    if frame_index == 0 {
         return Err("animation has no frames (empty cuts)".into());
     }
-    let transparent = anim.scene.output.transparent.unwrap_or(false);
-    Ok(RenderedAnimation {
-        frames,
-        width: w,
-        height: h,
-        fps,
-        background: if transparent {
-            None
-        } else {
-            anim.scene.output.background.as_ref().map(|c| c.0)
-        },
-        transparent,
-    })
+    Ok(meta)
 }
 
 /// Per-mesh base geometry for ABSOLUTE cut transforms: scale/translate are
@@ -307,6 +344,9 @@ fn apply_cut(app: &mut App, cut: &Cut, state: &mut AnimState) -> Result<(), Stri
         if let Some(t) = cam.target {
             app.camera.target = glam::Vec3::from(t);
         }
+        if let Some(scale) = cam.ortho_scale {
+            app.camera.ortho_scale = scale.clamp(0.01, 100.0);
+        }
         if let Some(zoom) = cam.zoom {
             app.camera.zoom(zoom);
         }
@@ -354,10 +394,18 @@ fn reload_mesh(
 ) -> Result<(), String> {
     let mut meshes = meshtui_core::loaders::load_path(std::path::Path::new(path))
         .map_err(|e| format!("cannot load mesh {path:?}: {e}"))?;
-    if meshes.is_empty() {
-        return Err(format!("no geometry in {path:?}"));
-    }
-    let mut loaded = meshes.swap_remove(0);
+    let mut loaded = match entry.source_index {
+        Some(index) => meshes
+            .into_iter()
+            .nth(index)
+            .ok_or_else(|| format!("mesh source_index {index} is out of range for {path:?}"))?,
+        None => {
+            if meshes.is_empty() {
+                return Err(format!("no geometry in {path:?}"));
+            }
+            meshes.swap_remove(0)
+        }
+    };
     let idx = entry
         .name
         .as_deref()
@@ -509,6 +557,10 @@ fn apply_cut_tweened(
             let target = glam::Vec3::from(target);
             app.camera.target = before.target + (target - before.target) * t;
         }
+        if let Some(scale) = cam.ortho_scale {
+            app.camera.ortho_scale =
+                before.ortho_scale + (scale.clamp(0.01, 100.0) - before.ortho_scale) * t;
+        }
         if let Some(zoom) = cam.zoom {
             app.camera.zoom(1.0 + (zoom - 1.0) * t);
         }
@@ -627,7 +679,6 @@ fn apply_transform(mesh: &mut meshtui_core::Mesh, entry: &MeshEntry, base: Optio
 }
 
 /// Composite a raw frame over the background (no-op when transparent).
-/// Composite a raw frame over the background (no-op when transparent).
 /// `background` is linear 0..1 floats; `pixels` are sRGB u8.
 pub(crate) fn composite_frame(mut pixels: Vec<u8>, background: Option<Color>) -> Vec<u8> {
     let Some(bg) = background else { return pixels };
@@ -681,57 +732,298 @@ fn dither_gif_alpha(pixels: &mut [u8], width: u32) {
     }
 }
 
-/// Encode the rendered frames as an animated GIF.
-///
-/// GIF has 1-bit alpha. Fully transparent and fully opaque pixels are kept;
-/// intermediate alpha is converted to binary coverage with deterministic
-/// ordered Bayer dithering. `Frame::from_rgba_speed` supplies the matching
-/// transparent palette index.
-pub fn encode_gif(anim: &RenderedAnimation, out: &Path) -> Result<(), String> {
-    use gif::{Encoder, Frame, Repeat};
-    // Write to a temp file and rename on success so a failure never leaves a
-    // truncated GIF at the output path.
-    let tmp = out.with_extension("gif.tmp");
-    let result = (|| -> Result<(), String> {
-        let mut file = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
-        let mut encoder = Encoder::new(&mut file, anim.width as u16, anim.height as u16, &[])
-            .map_err(|e| e.to_string())?;
-        encoder
-            .set_repeat(Repeat::Infinite)
-            .map_err(|e| e.to_string())?;
-        let delay_cs = (100 / anim.fps.max(1)) as u16; // hundredths of a second
+/// Build one GIF frame from raw RGBA renderer pixels. Delay is distributed by
+/// cumulative rounding, so non-divisor frame rates (e.g. 30 fps) keep the
+/// requested total duration instead of playing at 33.3 fps.
+pub(crate) fn make_gif_frame(
+    raw: &[u8],
+    meta: &RenderMetadata,
+    frame_index: usize,
+) -> gif::Frame<'static> {
+    use std::borrow::Cow;
 
-        for raw in &anim.frames {
-            let pixels = composite_frame(raw.clone(), anim.background);
-            let mut frame = if anim.transparent {
-                // Convert partial alpha to binary coverage before quantization.
-                // from_rgba_speed creates and records the transparent index.
-                let mut binned = pixels.clone();
-                dither_gif_alpha(&mut binned, anim.width);
-                Frame::from_rgba_speed(anim.width as u16, anim.height as u16, &mut binned, 10)
-            } else {
-                let mut rgb: Vec<u8> = Vec::with_capacity(pixels.len() / 4 * 3);
-                for px in pixels.as_chunks::<4>().0 {
-                    rgb.extend_from_slice(&px[..3]);
-                }
-                Frame::from_rgb_speed(anim.width as u16, anim.height as u16, &rgb, 10)
-            };
-            frame.delay = delay_cs;
-            // With a transparent background, "keep" disposal would let earlier
-            // frames show through this frame's transparent pixels (ghosting
-            // trails). Restore-to-background clears them instead.
-            frame.dispose = gif::DisposalMethod::Background;
-            encoder.write_frame(&frame).map_err(|e| e.to_string())?;
+    let pixels = composite_frame(raw.to_vec(), meta.background);
+    let mut frame = if meta.transparent {
+        let mut binned = pixels;
+        dither_gif_alpha(&mut binned, meta.width);
+        gif::Frame::from_rgba_speed(meta.width as u16, meta.height as u16, &mut binned, 10)
+    } else {
+        let mut rgb: Vec<u8> = Vec::with_capacity(pixels.len() / 4 * 3);
+        for px in pixels.as_chunks::<4>().0 {
+            rgb.extend_from_slice(&px[..3]);
         }
-        Ok(())
-    })();
-    // Move the temp file into place; on ANY failure (encode or rename) the
-    // temp file is removed so no truncated artifact is left behind.
-    let result = result.and_then(|()| std::fs::rename(&tmp, out).map_err(|e| e.to_string()));
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
+        gif::Frame::from_rgb_speed(meta.width as u16, meta.height as u16, &rgb, 10)
+    };
+    let (units, denominator) = meta
+        .duration_centiseconds
+        .map(|centiseconds| (centiseconds, meta.total_frames.max(1)))
+        .unwrap_or_else(|| (100, meta.fps.max(1) as usize));
+    let start_cs = (frame_index * units + denominator / 2) / denominator;
+    let end_cs = ((frame_index + 1) * units + denominator / 2) / denominator;
+    frame.delay = (end_cs.saturating_sub(start_cs).max(1)).min(u16::MAX as usize) as u16;
+    frame.dispose = gif::DisposalMethod::Background;
+    frame.buffer = Cow::Owned(frame.buffer.into_owned());
+    frame
+}
+
+fn is_generated_frame_name(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy();
+    name.strip_prefix("frame_")
+        .and_then(|rest| rest.strip_suffix(".png"))
+        .is_some_and(|index| !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+fn restore_frame_backup(destination: &Path, backup: &Path, moved_new: &[std::path::PathBuf]) {
+    for path in moved_new {
+        let _ = std::fs::remove_file(path);
     }
-    result
+    if let Ok(entries) = std::fs::read_dir(backup) {
+        for entry in entries.flatten() {
+            let _ = std::fs::rename(entry.path(), destination.join(entry.file_name()));
+        }
+    }
+    let _ = std::fs::remove_dir(backup);
+}
+
+fn publish_frame_directory(
+    staging: &Path,
+    destination: &Path,
+    backup: &Path,
+) -> Result<(), String> {
+    if !destination.exists() {
+        return std::fs::rename(staging, destination)
+            .map_err(|e| format!("cannot publish {}: {e}", destination.display()));
+    }
+    if !destination.is_dir() {
+        return Err(format!(
+            "cannot replace {}: destination is not a directory",
+            destination.display()
+        ));
+    }
+
+    let mut old_frames = Vec::new();
+    for entry in std::fs::read_dir(destination)
+        .map_err(|e| format!("cannot inspect {}: {e}", destination.display()))?
+    {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if is_generated_frame_name(&entry.file_name()) {
+            if !entry.file_type().map_err(|e| e.to_string())?.is_file() {
+                return Err(format!(
+                    "cannot replace {}: generated frame path is not a file",
+                    entry.path().display()
+                ));
+            }
+            old_frames.push(entry.path());
+        }
+    }
+    let new_frames: Vec<_> = std::fs::read_dir(staging)
+        .map_err(|e| format!("cannot inspect {}: {e}", staging.display()))?
+        .map(|entry| entry.map_err(|e| e.to_string()))
+        .collect::<Result<_, _>>()?;
+
+    std::fs::create_dir(backup).map_err(|e| format!("cannot create {}: {e}", backup.display()))?;
+    for (index, old) in old_frames.iter().enumerate() {
+        if let Err(error) = std::fs::rename(old, backup.join(old.file_name().unwrap_or_default())) {
+            restore_frame_backup(destination, backup, &[]);
+            return Err(format!(
+                "cannot back up {} (after {index} files): {error}",
+                old.display()
+            ));
+        }
+    }
+
+    let mut moved_new = Vec::new();
+    for entry in new_frames {
+        let output = destination.join(entry.file_name());
+        if let Err(error) = std::fs::rename(entry.path(), &output) {
+            restore_frame_backup(destination, backup, &moved_new);
+            return Err(format!("cannot publish {}: {error}", output.display()));
+        }
+        moved_new.push(output);
+    }
+    let _ = std::fs::remove_dir(staging);
+    let _ = std::fs::remove_dir_all(backup);
+    Ok(())
+}
+
+/// Stream PNG and/or GIF outputs through temporary paths, publishing them
+/// only after every frame was rendered and encoded successfully.
+pub(crate) fn encode_outputs_streaming(
+    anim: &AnimFile,
+    config: Config,
+    size_override: Option<(u32, u32)>,
+    frames_dir: Option<&Path>,
+    gif_out: Option<&Path>,
+) -> Result<(usize, u32), String> {
+    if frames_dir.is_none() && gif_out.is_none() {
+        return Err("no animation output requested".into());
+    }
+
+    let suffix = format!(
+        "{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0)
+    );
+    let temp_neighbor = |path: &Path, kind: &str| {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("meshtui");
+        parent.join(format!(".{name}.{kind}.{suffix}.tmp"))
+    };
+    let staging_dir = frames_dir.map(|path| temp_neighbor(path, "frames"));
+    let gif_tmp = gif_out.map(|path| temp_neighbor(path, "gif"));
+    let frames_backup = frames_dir.map(|path| temp_neighbor(path, "frames-backup"));
+    let gif_backup = gif_out.map(|path| temp_neighbor(path, "gif-backup"));
+    let meta = metadata(anim, size_override);
+    if meta
+        .duration_centiseconds
+        .is_some_and(|duration| duration < meta.total_frames)
+    {
+        return Err(format!(
+            "duration is too short for {} GIF frames (minimum {:.2}s)",
+            meta.total_frames,
+            meta.total_frames as f32 / 100.0
+        ));
+    }
+    let filename_width = meta.total_frames.to_string().len().max(4);
+
+    let render_result = (|| -> Result<usize, String> {
+        if let Some(dir) = &staging_dir {
+            if let Some(parent) = dir.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+            }
+            std::fs::create_dir(dir)
+                .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        }
+        let mut gif_encoder = if let Some(path) = &gif_tmp {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+            }
+            let file = std::fs::File::create(path)
+                .map_err(|e| format!("cannot create {}: {e}", path.display()))?;
+            let width = u16::try_from(meta.width)
+                .map_err(|_| format!("GIF width {} exceeds 65535", meta.width))?;
+            let height = u16::try_from(meta.height)
+                .map_err(|_| format!("GIF height {} exceeds 65535", meta.height))?;
+            let mut encoder = gif::Encoder::new(file, width, height, &[])
+                .map_err(|e| format!("cannot initialize {}: {e}", path.display()))?;
+            encoder
+                .set_repeat(gif::Repeat::Infinite)
+                .map_err(|e| e.to_string())?;
+            Some(encoder)
+        } else {
+            None
+        };
+
+        let mut frame_count = 0usize;
+        render_each_with_config(anim, config, size_override, |index, pixels, frame_meta| {
+            if let Some(dir) = &staging_dir {
+                let path = dir.join(format!("frame_{index:0filename_width$}.png"));
+                let png_pixels = composite_frame(pixels.to_vec(), frame_meta.background);
+                let file = std::fs::File::create(&path)
+                    .map_err(|e| format!("cannot create {}: {e}", path.display()))?;
+                let mut writer = std::io::BufWriter::new(file);
+                image::write_buffer_with_format(
+                    &mut writer,
+                    &png_pixels,
+                    frame_meta.width,
+                    frame_meta.height,
+                    image::ColorType::Rgba8,
+                    image::ImageFormat::Png,
+                )
+                .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+                std::io::Write::flush(&mut writer)
+                    .map_err(|e| format!("cannot flush {}: {e}", path.display()))?;
+                writer
+                    .get_ref()
+                    .sync_all()
+                    .map_err(|e| format!("cannot sync {}: {e}", path.display()))?;
+            }
+            if let Some(encoder) = &mut gif_encoder {
+                let frame = make_gif_frame(pixels, frame_meta, index);
+                encoder.write_frame(&frame).map_err(|e| e.to_string())?;
+            }
+            frame_count += 1;
+            Ok(())
+        })?;
+        if let Some(encoder) = gif_encoder {
+            let file = encoder
+                .into_inner()
+                .map_err(|e| format!("cannot finalize GIF: {e}"))?;
+            file.sync_all()
+                .map_err(|e| format!("cannot sync GIF: {e}"))?;
+        }
+        Ok(frame_count)
+    })();
+
+    let cleanup = || {
+        if let Some(path) = &staging_dir {
+            let _ = std::fs::remove_dir_all(path);
+        }
+        if let Some(path) = &gif_tmp {
+            let _ = std::fs::remove_file(path);
+        }
+    };
+    let frame_count = match render_result {
+        Ok(count) => count,
+        Err(error) => {
+            cleanup();
+            return Err(error);
+        }
+    };
+
+    let mut old_gif_backed_up = false;
+    if let (Some(temp), Some(destination), Some(backup)) = (&gif_tmp, gif_out, &gif_backup) {
+        if destination.exists() {
+            if !destination.is_file() {
+                cleanup();
+                return Err(format!(
+                    "cannot replace {}: destination is not a file",
+                    destination.display()
+                ));
+            }
+            if let Err(error) = std::fs::rename(destination, backup) {
+                cleanup();
+                return Err(format!("cannot back up {}: {error}", destination.display()));
+            }
+            old_gif_backed_up = true;
+        }
+        if let Err(error) = std::fs::rename(temp, destination) {
+            if old_gif_backed_up {
+                let _ = std::fs::rename(backup, destination);
+            }
+            cleanup();
+            return Err(format!("cannot publish {}: {error}", destination.display()));
+        }
+    }
+
+    if let (Some(staging), Some(destination), Some(backup)) =
+        (&staging_dir, frames_dir, &frames_backup)
+    {
+        if let Err(error) = publish_frame_directory(staging, destination, backup) {
+            if let (Some(gif), Some(backup)) = (gif_out, &gif_backup) {
+                let _ = std::fs::remove_file(gif);
+                if old_gif_backed_up {
+                    let _ = std::fs::rename(backup, gif);
+                }
+            }
+            cleanup();
+            return Err(error);
+        }
+    }
+    if old_gif_backed_up {
+        if let Some(backup) = &gif_backup {
+            let _ = std::fs::remove_file(backup);
+        }
+    }
+    Ok((frame_count, meta.fps))
 }
 
 #[cfg(test)]
@@ -1055,5 +1347,43 @@ cuts:
             .iter()
             .filter(|px| px[3] == 0)
             .all(|px| px[..3] == [0, 0, 0]));
+    }
+
+    #[test]
+    fn gif_delays_preserve_duration_at_30_fps() {
+        let meta = RenderMetadata {
+            width: 1,
+            height: 1,
+            fps: 30,
+            background: None,
+            transparent: true,
+            total_frames: 30,
+            duration_centiseconds: None,
+        };
+        let raw = [0, 0, 0, 0];
+        let delays: Vec<u16> = (0..30)
+            .map(|index| make_gif_frame(&raw, &meta, index).delay)
+            .collect();
+        assert_eq!(delays.iter().copied().sum::<u16>(), 100);
+        assert!(delays.contains(&3));
+        assert!(delays.contains(&4));
+    }
+
+    #[test]
+    fn explicit_duration_overrides_rounded_frame_budget() {
+        let meta = RenderMetadata {
+            width: 1,
+            height: 1,
+            fps: 20,
+            background: None,
+            transparent: true,
+            total_frames: 25,
+            duration_centiseconds: Some(123),
+        };
+        let raw = [0, 0, 0, 0];
+        let total: u16 = (0..25)
+            .map(|index| make_gif_frame(&raw, &meta, index).delay)
+            .sum();
+        assert_eq!(total, 123);
     }
 }

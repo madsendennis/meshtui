@@ -117,8 +117,9 @@ pub fn load_meshes(path: &Path) -> Result<Vec<Mesh>, LoadError> {
         "glb" => glb::load(path, bytes)?,
         other => return Err(LoadError::UnsupportedFormat(other.to_string())),
     };
-    for m in &mut meshes {
+    for (source_index, m) in meshes.iter_mut().enumerate() {
         m.source = Some(path.to_path_buf());
+        m.source_index = Some(source_index);
         validate_mesh(path, m)?;
         if m.normals.is_empty()
             || m.normals

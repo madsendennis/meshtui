@@ -19,7 +19,7 @@ zoom_out_factor = 1.1                  # Multiplier for 'Z' key (zoom out)
 
 [view]
 # Default view settings
-default_axis = "-y"                    # Default view axis: +x, -x, +y, -y, +z, -z
+default_axis = "+z"                    # MeshLab-style front: camera at +Z, looking -Z, with Y-up
 
 # Up vectors for cycling with u/U keys (first one is the default)
 up_vectors = [ # First index is default

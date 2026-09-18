@@ -1,11 +1,15 @@
 use glam::Vec3;
 use rayon::prelude::*;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::Color;
+
+static NEXT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// A single triangle mesh.
 #[derive(Debug, Clone)]
 pub struct Mesh {
+    instance_id: u64,
     pub name: String,
     /// Flat xyz vertex positions, len = 3 * vertex_count.
     pub positions: Vec<Vec3>,
@@ -21,11 +25,15 @@ pub struct Mesh {
     /// File the mesh was loaded from, when known. Scene/animation files
     /// reference meshes by path, so recordings need it to reload geometry.
     pub source: Option<std::path::PathBuf>,
+    /// Zero-based geometry index within `source` (OBJ/GLB can contain several
+    /// meshes). Recordings use it to reload exactly one geometry.
+    pub source_index: Option<usize>,
 }
 
 impl Mesh {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            instance_id: NEXT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
             name: name.into(),
             positions: Vec::new(),
             normals: Vec::new(),
@@ -34,7 +42,14 @@ impl Mesh {
             original_color: None,
             visible: true,
             source: None,
+            source_index: None,
         }
+    }
+
+    /// Runtime-stable identity. Clones retain it (delete/undo), while a newly
+    /// loaded instance receives a new ID even when it uses the same source.
+    pub fn instance_id(&self) -> u64 {
+        self.instance_id
     }
 
     pub fn vertex_count(&self) -> usize {

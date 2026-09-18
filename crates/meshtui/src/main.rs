@@ -366,7 +366,12 @@ pub(crate) fn apply_scene_camera_post(app: &mut app::App, file: &meshtui_core::S
     let cam = &file.camera;
     // Target rides along: the one-time fit recenters it, so it must be
     // (re-)applied after the fit.
-    app.apply_post_fit_camera(cam.zoom, cam.distance, cam.target.map(glam::Vec3::from));
+    app.apply_post_fit_camera(
+        cam.zoom,
+        cam.distance,
+        cam.target.map(glam::Vec3::from),
+        cam.ortho_scale,
+    );
     if let Some(light) = file.light {
         app.set_light_scale(light);
     }
@@ -401,18 +406,18 @@ fn print_capabilities() {
             },
             "render": {
                 "about": "render a YAML scene file to one PNG",
-                "scene_file": "meshes (path/name/color/alpha/visible/scale/translate), camera, light, wireframe, output (size/background/transparent)",
-                "camera_keys": ["kind", "view", "azimuth", "elevation", "up", "fov", "zoom", "distance", "orientation [x,y,z,w]", "target [x,y,z]"],
+                "scene_file": "meshes (path/source_index/name/color/alpha/visible/scale/translate), camera, light, wireframe, output (size/background/transparent)",
+                "camera_keys": ["kind", "view", "azimuth", "elevation", "up", "fov", "zoom", "distance", "ortho_scale", "orientation [x,y,z,w]", "target [x,y,z]"],
                 "camera_note": "camera.distance/zoom are kept across renders; the camera auto-fits once at start and does NOT reframe per frame, so framing is stable across an animation",
             },
             "animate": {
                 "about": "render a base scene + scene cuts to a looping GIF",
-                "cuts": "top level is the scene-file format plus fps/frames/cuts; each cut holds N frames and changes only what it names; state persists across cuts",
+                "cuts": "top level is the scene-file format plus fps/frames/duration/cuts; duration optionally preserves an exact GIF playback duration in seconds; each cut holds N frames and changes only what it names; state persists across cuts",
                 "cut_keys": ["frames", "tween", "ease", "camera", "meshes", "light", "wireframe"],
-                "cut_camera_keys": ["view", "azimuth", "elevation", "azimuth_to", "elevation_to", "up", "zoom", "distance", "kind", "fov", "orientation [x,y,z,w]", "target [x,y,z]"],
+                "cut_camera_keys": ["view", "azimuth", "elevation", "azimuth_to", "elevation_to", "up", "zoom", "distance", "ortho_scale", "kind", "fov", "orientation [x,y,z,w]", "target [x,y,z]"],
                 "cut_semantics": {
                     "camera": "RELATIVE deltas that accumulate across cuts: azimuth/elevation add to the pose, zoom multiplies (two cuts of zoom:2 = 4x). azimuth_to/elevation_to are ABSOLUTE poses measured from the base view, ignoring earlier cuts.",
-                    "meshes": "ABSOLUTE replacement: color/alpha/visible/scale/translate set the value (not a delta); a mesh entry with `path` reloads that mesh's geometry",
+                    "meshes": "ABSOLUTE replacement: color/alpha/visible/scale/translate set the value (not a delta); a mesh entry with `path` reloads geometry and optional `source_index` selects one object from a multi-object file",
                     "tween": "tween: true interpolates the cut's changes over its frames (ease: linear|in|out|inout); every frame derives from the pre-cut state, so values never compound",
                 },
                 "frames_dir": "--frames-dir DIR writes numbered PNGs (combine with -o to also emit the GIF in one render pass)",
@@ -422,7 +427,7 @@ fn print_capabilities() {
             },
         },
         "scene_file_open": "passing a .yaml/.yml as the mesh argument opens that scene in the TUI",
-        "tui_recording": "in the TUI: double-tap the record key (q) to start recording, tap it once per camera move to add a cut, press Q to finish (asks for the GIF duration) — writes the animation YAML plus rendered PNG frames and a GIF automatically",
+        "tui_recording": "in the TUI: double-tap q to capture the initial state, tap q to checkpoint all camera/mesh/light/wireframe changes, press Q to choose the GIF duration, or Esc to cancel — writes YAML plus PNG frames and a GIF automatically",
     });
     println!("{}", serde_json::to_string_pretty(&spec).unwrap());
 }
@@ -647,47 +652,22 @@ fn run_animate(
     frames_dir: Option<&Path>,
 ) -> Result<(), String> {
     let anim = animate::load(file)?;
-    let rendered = animate::render(&anim, config_path, size)?;
-    let frames = rendered.frames.len();
-    let fps = rendered.fps;
-
-    // PNG frames (optional) and GIF both come from the same render pass.
-    if let Some(dir) = frames_dir {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        let width = frames.to_string().len();
-        for (i, pixels) in rendered.frames.iter().enumerate() {
-            let pixels = composite(
-                pixels.clone(),
-                rendered.width,
-                &HeadlessOpts {
-                    background: rendered.background.map(|c| {
-                        [
-                            (c[0] * 255.0) as u8,
-                            (c[1] * 255.0) as u8,
-                            (c[2] * 255.0) as u8,
-                            (c[3] * 255.0) as u8,
-                        ]
-                    }),
-                    transparent: rendered.transparent,
-                    ..Default::default()
-                },
-            );
-            let path = dir.join(format!("frame_{i:0width$}.png"));
-            write_png(&path, &pixels, rendered.width, rendered.height)?;
-        }
-        println!("wrote {frames} frames to {}", dir.display());
-    }
-
     // GIF unless the caller asked for frames only (no -o and frames-dir set).
     let want_gif = output.is_some() || frames_dir.is_none();
-    if !want_gif {
-        return Ok(());
+    let out = want_gif.then(|| {
+        output
+            .map(PathBuf::from)
+            .unwrap_or_else(|| file.with_extension("gif"))
+    });
+    let config = Config::load_effective(config_path).map_err(|e| e.to_string())?;
+    let (frames, fps) =
+        animate::encode_outputs_streaming(&anim, config, size, frames_dir, out.as_deref())?;
+    if let Some(dir) = frames_dir {
+        println!("wrote {frames} frames to {}", dir.display());
     }
-    let out = output
-        .map(PathBuf::from)
-        .unwrap_or_else(|| file.with_extension("gif"));
-    animate::encode_gif(&rendered, &out)?;
-    println!("{} ({} frames @ {} fps)", out.display(), frames, fps);
+    if let Some(out) = out {
+        println!("{} ({} frames @ {} fps)", out.display(), frames, fps);
+    }
     Ok(())
 }
 

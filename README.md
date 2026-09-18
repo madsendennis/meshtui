@@ -141,7 +141,7 @@ TUI. Example:
 ```yaml
 size: [1600, 1200]
 background: "#1a1b26"
-camera: { kind: orthographic, view: "+z", up: [0, 0, 1] }
+camera: { kind: orthographic, view: "+z", up: [0, 1, 0] }
 meshes:
   - { path: gear.ply, name: gear, color: "#ff8000", alpha: 0.9 }
   - { path: base.ply, name: base, color: gray }
@@ -152,7 +152,8 @@ meshes:
 `meshtui animate cuts.yaml -o out.gif` renders a base scene plus a list of
 cuts. Each cut holds N frames (`fps`-timed) and changes only what it names —
 camera, per-mesh color/alpha/visibility/transform, light, wireframe — so a
-camera-only move is one line. `--frames-dir DIR` dumps PNGs instead.
+camera-only move is one line. Optional top-level `duration` preserves an exact
+GIF playback duration in seconds. `--frames-dir DIR` dumps PNGs instead.
 
 ```yaml
 size: [800, 600]
@@ -167,6 +168,15 @@ cuts:
   - frames: 8
     meshes: [{ name: gear, color: red }]
 ```
+
+### TUI stop-motion recording
+
+Press `qq` to capture the initial state, then press `q` after each pose or
+scene change. A checkpoint includes the camera, mesh additions/deletions,
+visibility, color/opacity, lighting, and wireframe. Press `Q` to choose the
+duration and automatically write the YAML, PNG frames, and GIF; press `Esc`
+to cancel. Toggle automatic reframing with `,` (turning it back on reframes
+immediately).
 
 ## Configuration
 

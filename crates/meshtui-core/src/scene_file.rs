@@ -124,6 +124,9 @@ pub struct CameraSpec {
     /// Absolute look-at target. Applied after the one-time auto-fit (the fit
     /// recenters the target, so it must win over it).
     pub target: Option<[f32; 3]>,
+    /// Absolute orthographic scale. Kept separate from distance so zoomed
+    /// orthographic recordings do not move the camera through the mesh.
+    pub ortho_scale: Option<f32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -134,6 +137,9 @@ pub struct MeshEntry {
     /// `name` instead of loading a new one.
     #[serde(alias = "source")]
     pub path: Option<String>,
+    /// Select one geometry from a multi-object source (zero-based). Omit to
+    /// preserve the normal behavior of loading every geometry in the file.
+    pub source_index: Option<usize>,
     pub name: Option<String>,
     pub color: Option<ColorSpec>,
     pub alpha: Option<f32>,
@@ -243,6 +249,17 @@ impl SceneFile {
     /// Build the mesh scene: load each entry, apply overrides (name, color,
     /// alpha, visibility, uniform scale + translate).
     pub fn build_scene(&self) -> Result<Scene, SceneError> {
+        self.build_scene_inner(false)
+    }
+
+    /// Build a scene for an animation. Unlike an interactive/render scene,
+    /// an empty scene is valid: it produces blank frames until a cut adds
+    /// geometry.
+    pub fn build_scene_allow_empty(&self) -> Result<Scene, SceneError> {
+        self.build_scene_inner(true)
+    }
+
+    fn build_scene_inner(&self, allow_empty: bool) -> Result<Scene, SceneError> {
         let mut scene = Scene::new();
         for entry in &self.meshes {
             let path = entry
@@ -251,12 +268,20 @@ impl SceneFile {
                 .ok_or_else(|| SceneError::Load("mesh entry needs a path".into()))?;
             let mut meshes = crate::loaders::load_path(Path::new(path))
                 .map_err(|e| SceneError::Load(e.to_string()))?;
+            if let Some(index) = entry.source_index {
+                let mesh = meshes.into_iter().nth(index).ok_or_else(|| {
+                    SceneError::Load(format!(
+                        "mesh source_index {index} is out of range for {path:?}"
+                    ))
+                })?;
+                meshes = vec![mesh];
+            }
             for mesh in &mut meshes {
                 entry.apply(mesh);
             }
             scene.meshes.extend(meshes);
         }
-        if scene.meshes.is_empty() {
+        if scene.meshes.is_empty() && !allow_empty {
             return Err(SceneError::Load("no geometry loaded".into()));
         }
         Ok(scene)
@@ -398,5 +423,35 @@ meshes:
         assert_eq!(mesh.name, "m");
         assert_eq!(mesh.positions[0], glam::Vec3::new(3.0, 0.0, 0.0));
         assert_eq!(mesh.color, [1.0, 0.4, 0.4, 1.0]);
+    }
+
+    #[test]
+    fn source_index_selects_one_object_from_multi_object_file() {
+        let dir = std::env::temp_dir().join(format!("meshtui_source_index_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("two.obj");
+        std::fs::write(
+            &path,
+            "o first\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n\
+             o second\nv 2 0 0\nv 3 0 0\nv 2 1 0\nf 4 5 6\n",
+        )
+        .unwrap();
+
+        let file = parse_str(&format!(
+            "meshes:\n  - path: '{}'\n    source_index: 1\n    name: selected\n",
+            path.display()
+        ))
+        .unwrap();
+        let scene = file.build_scene().unwrap();
+        assert_eq!(scene.meshes.len(), 1);
+        assert_eq!(scene.meshes[0].name, "selected");
+        assert_eq!(scene.meshes[0].source_index, Some(1));
+        assert!(scene.meshes[0]
+            .positions
+            .iter()
+            .all(|position| position.x >= 2.0));
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
