@@ -739,6 +739,16 @@ impl App {
         self.frame_visible_meshes();
     }
 
+    /// Scale all three light intensities (like the TUI `i`/`I`).
+    pub fn set_light_scale(&mut self, scale: f32) {
+        self.light_scale = scale.clamp(0.0, 4.0);
+    }
+
+    /// Set the wireframe overlay thickness in pixels (0 disables).
+    pub fn set_wireframe_thickness(&mut self, thickness: f32) {
+        self.wireframe_thickness = thickness.clamp(0.0, 10.0);
+    }
+
     /// Recenter and refit zoom to currently visible meshes, keeping orbit.
     fn frame_visible_meshes(&mut self) {
         if let Some((min, max)) = self.scene.visible_bounds() {

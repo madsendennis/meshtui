@@ -10,9 +10,10 @@
 
 mod app;
 mod commands;
+mod headless;
 
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
@@ -20,7 +21,9 @@ use serde::Serialize;
 
 use meshtui_core::config::{self, Config};
 use meshtui_core::loaders::{load_path, load_path_detailed};
-use meshtui_core::{MeshInfo, Scene, ViewAxis};
+use meshtui_core::{Color, MeshInfo, Scene, ViewAxis};
+
+use headless::{parse_color, parse_mesh_spec, HeadlessOpts, MeshSpec};
 const LONG_ABOUT: &str = "\
 Terminal 3D mesh viewer using the Kitty graphics protocol.
 
@@ -88,32 +91,79 @@ enum Commands {
         json: bool,
     },
     /// Render one mesh from several viewpoints to numbered PNGs
-    Screenshot {
-        /// Mesh file or directory
-        #[arg(value_name = "MESH", required = true)]
-        mesh: PathBuf,
+    Screenshot(Box<ScreenshotArgs>),
+}
 
-        /// Extra TOML config merged over the user config
-        #[arg(long, value_name = "PATH")]
-        config: Option<PathBuf>,
+/// Args for `meshtui screenshot` (boxed in the enum to keep it small).
+#[derive(Debug, clap::Args)]
+struct ScreenshotArgs {
+    /// Mesh files, directories, or specs (`[name=]path[:color=C][:alpha=A][:visible=B]`)
+    #[arg(value_name = "MESH", required = true, value_parser = parse_mesh_spec_flag)]
+    mesh: Vec<MeshSpec>,
 
-        /// Viewpoint set: "all" (6 axis views), "iso" (4 diagonal views),
-        /// or "ring:N" (N angles around the up axis, 2..=64)
-        #[arg(long, default_value = "all", value_parser = parse_view_set)]
-        views: ViewSet,
+    /// Extra TOML config merged over the user config
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
 
-        /// Write files into DIR (created; default: meshtui_views_<timestamp>)
-        #[arg(long, value_name = "DIR")]
-        out_dir: Option<PathBuf>,
+    /// Camera projection
+    #[arg(long, value_name = "KIND", value_parser = ["ortho", "persp", "orthographic", "perspective"])]
+    camera: Option<String>,
 
-        /// Common output name prefix (default: input file stem)
-        #[arg(long, value_name = "PREFIX")]
-        prefix: Option<String>,
+    /// View axis (+x/-x/+y/-y/+z/-z)
+    #[arg(long, value_name = "AXIS", value_parser = parse_view)]
+    view: Option<ViewAxis>,
 
-        /// Screenshot size, WxH (1..=4096 per side)
-        #[arg(long, default_value = "1600x1200", value_parser = parse_size)]
-        size: (u32, u32),
-    },
+    /// Camera azimuth in degrees around the up axis
+    #[arg(long, value_name = "DEG", allow_negative_numbers = true)]
+    azimuth: Option<f32>,
+
+    /// Camera elevation in degrees above the horizon (default 30)
+    #[arg(long, value_name = "DEG", allow_negative_numbers = true)]
+    elevation: Option<f32>,
+
+    /// World up vector as X,Y,Z (e.g. --up 0,0,1 for Z-up parts)
+    #[arg(long, value_name = "X,Y,Z", value_parser = parse_vec3)]
+    up: Option<glam::Vec3>,
+
+    /// Vertical field of view in degrees (perspective only)
+    #[arg(long, value_name = "DEG")]
+    fov: Option<f32>,
+
+    /// Zoom factor (< 1 in, > 1 out), like the TUI z/Z
+    #[arg(long, value_name = "FACTOR")]
+    zoom: Option<f32>,
+
+    /// Explicit target→camera distance (overrides the auto fit)
+    #[arg(long, value_name = "DIST")]
+    distance: Option<f32>,
+
+    /// Light intensity scale 0..=4, like the TUI i/I
+    #[arg(long, value_name = "SCALE")]
+    light: Option<f32>,
+
+    /// Wireframe thickness in pixels; 0 disables
+    #[arg(long, value_name = "PX")]
+    wireframe: Option<f32>,
+
+    /// Background as #RRGGBB[AA]; default transparent
+    #[arg(long, value_name = "COLOR", value_parser = parse_color_flag)]
+    background: Option<Color>,
+
+    /// Viewpoint set: "all", "iso", "grid", or "ring:N"
+    #[arg(long, default_value = "all", value_parser = parse_view_set)]
+    views: ViewSet,
+
+    /// Write files into DIR (created; default: meshtui_views_<timestamp>)
+    #[arg(long, value_name = "DIR")]
+    out_dir: Option<PathBuf>,
+
+    /// Common output name prefix (default: first input file stem)
+    #[arg(long, value_name = "PREFIX")]
+    prefix: Option<String>,
+
+    /// Screenshot size, WxH (1..=4096 per side)
+    #[arg(long, default_value = "1600x1200", value_parser = parse_size)]
+    size: (u32, u32),
 }
 
 /// One planned view: the output file suffix plus the camera direction
@@ -149,6 +199,24 @@ fn parse_size(s: &str) -> Result<(u32, u32), String> {
 
 fn parse_view(s: &str) -> Result<ViewAxis, String> {
     ViewAxis::parse(s).ok_or("--view must be one of +x, -x, +y, -y, +z, -z".into())
+}
+
+fn parse_mesh_spec_flag(s: &str) -> Result<MeshSpec, String> {
+    parse_mesh_spec(s)
+}
+
+fn parse_color_flag(s: &str) -> Result<Color, String> {
+    parse_color(s)
+}
+
+fn parse_vec3(s: &str) -> Result<glam::Vec3, String> {
+    let parts: Vec<&str> = s.split(',').collect();
+    if parts.len() != 3 {
+        return Err("expected X,Y,Z".into());
+    }
+    let v: Result<Vec<f32>, _> = parts.iter().map(|p| p.trim().parse::<f32>()).collect();
+    let v = v.map_err(|_| "expected three numbers X,Y,Z".to_string())?;
+    Ok(glam::Vec3::new(v[0], v[1], v[2]))
 }
 
 fn parse_view_set(s: &str) -> Result<ViewSet, String> {
@@ -388,30 +456,31 @@ fn print_human_info(entries: &[MeshEntry], totals: &InfoTotals) {
     }
 }
 
-/// `meshtui screenshot`: render one mesh from several viewpoints into
-/// numbered PNGs. The axis/iso/ring poses come from the same basis math as
-/// the interactive camera, so headless frames match the TUI.
+/// `meshtui screenshot`: render mesh(es) from several viewpoints into
+/// numbered PNGs. Per-mesh colors/visibility/alpha and the camera/light/
+/// wireframe flags all apply, so the terminal can set up the full scene the
+/// TUI would show.
+#[allow(clippy::too_many_arguments)]
 fn run_screenshot(
-    mesh_path: &std::path::Path,
+    specs: &[MeshSpec],
     config_path: Option<&std::path::Path>,
+    opts: &HeadlessOpts,
     set: &ViewSet,
     out_dir: Option<&std::path::Path>,
     prefix: Option<&str>,
     size: (u32, u32),
 ) -> Result<(), String> {
-    let meshes = load_path(mesh_path).map_err(|e| e.to_string())?;
-    let mut scene = Scene::new();
-    scene.meshes.extend(meshes);
-    if scene.meshes.is_empty() {
-        return Err("no geometry loaded".into());
-    }
+    let scene = headless::load_scene(specs)?;
     let config = Config::load_effective(config_path).map_err(|e| e.to_string())?;
-    let up = glam::Vec3::from(config.view.up_vectors[0]);
+    let up = opts
+        .up
+        .unwrap_or_else(|| glam::Vec3::from(config.view.up_vectors[0]));
 
     let mut app = app::App::new(scene, config);
+    headless::apply_headless(&mut app, opts);
 
     let prefix = prefix.map(String::from).unwrap_or_else(|| {
-        mesh_path
+        Path::new(&specs[0].path)
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("mesh")
@@ -433,7 +502,7 @@ fn run_screenshot(
 
     if matches!(set, ViewSet::Grid) {
         let path = dir.join(format!("{prefix}_grid.png"));
-        write_view_grid(&mut app, &path, size, up)?;
+        write_view_grid(&mut app, &path, size, up, opts)?;
         println!("{}", path.display());
         return Ok(());
     }
@@ -441,10 +510,47 @@ fn run_screenshot(
     for spec in view_specs(set, up) {
         pose_camera(&mut app, &spec);
         let path = dir.join(format!("{prefix}_{}.png", spec.suffix));
-        app::save_screenshot(&mut app, &path, size.0, size.1).map_err(|e| e.to_string())?;
+        save_shot(&mut app, &path, size, opts)?;
         println!("{}", path.display());
     }
     Ok(())
+}
+
+/// Save a frame, compositing over `--background` unless transparent.
+fn save_shot(
+    app: &mut app::App,
+    path: &std::path::Path,
+    size: (u32, u32),
+    opts: &HeadlessOpts,
+) -> Result<(), String> {
+    let frame = app
+        .render_frame(size.0, size.1)
+        .ok_or("nothing to screenshot: all meshes hidden")?;
+    let pixels = composite(frame.pixels, frame.width, opts);
+    write_png(path, &pixels, frame.width, frame.height)
+}
+
+/// Alpha-composite a rendered frame over the background color (no-op when the
+/// background is transparent / unset).
+fn composite(mut pixels: Vec<u8>, _width: u32, opts: &HeadlessOpts) -> Vec<u8> {
+    let Some(bg) = opts.background.filter(|_| !opts.transparent) else {
+        return pixels;
+    };
+    let (br, bg_g, bb) = (
+        bg[0] as f32 / 255.0,
+        bg[1] as f32 / 255.0,
+        bg[2] as f32 / 255.0,
+    );
+    for px in pixels.as_chunks_mut::<4>().0.iter_mut() {
+        let a = px[3] as f32 / 255.0;
+        if a < 1.0 {
+            px[0] = (px[0] as f32 * a + br * 255.0 * (1.0 - a)).round() as u8;
+            px[1] = (px[1] as f32 * a + bg_g * 255.0 * (1.0 - a)).round() as u8;
+            px[2] = (px[2] as f32 * a + bb * 255.0 * (1.0 - a)).round() as u8;
+            px[3] = 255;
+        }
+    }
+    pixels
 }
 
 /// Pose the camera for a planned view (no-op when the spec has no override).
@@ -471,6 +577,7 @@ fn write_view_grid(
     path: &std::path::Path,
     size: (u32, u32),
     up: glam::Vec3,
+    opts: &HeadlessOpts,
 ) -> Result<(), String> {
     let (w, h) = size;
     let cell_w = (w / 3).max(1);
@@ -488,16 +595,8 @@ fn write_view_grid(
         let row = (i / 3) as u32;
         blit(&mut pixels, w, &frame, col * cell_w, row * cell_h);
     }
-    image::write_buffer_with_format(
-        &mut std::io::BufWriter::new(std::fs::File::create(path).map_err(|e| e.to_string())?),
-        &pixels,
-        w,
-        h,
-        image::ColorType::Rgba8,
-        image::ImageFormat::Png,
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
+    let pixels = composite(pixels, w, opts);
+    write_png(path, &pixels, w, h)
 }
 
 /// Copy `frame` into the RGBA `canvas` (width `canvas_w`) at offset (ox, oy),
@@ -512,26 +611,57 @@ fn blit(canvas: &mut [u8], canvas_w: u32, frame: &meshtui_render::Frame, ox: u32
     }
 }
 
+/// Write RGBA pixels to a PNG.
+fn write_png(path: &std::path::Path, pixels: &[u8], w: u32, h: u32) -> Result<(), String> {
+    image::write_buffer_with_format(
+        &mut std::io::BufWriter::new(std::fs::File::create(path).map_err(|e| e.to_string())?),
+        pixels,
+        w,
+        h,
+        image::ColorType::Rgba8,
+        image::ImageFormat::Png,
+    )
+    .map_err(|e| e.to_string())
+}
+
 fn run(cli: Cli) -> Result<(), String> {
     validate_cli(&cli)?;
 
     match &cli.command {
         Some(Commands::Info { meshes, json }) => return run_info(meshes, *json),
-        Some(Commands::Screenshot {
-            mesh,
-            config,
-            views,
-            out_dir,
-            prefix,
-            size,
-        }) => {
+        Some(Commands::Screenshot(args)) => {
+            let opts = HeadlessOpts {
+                camera_kind: args.camera.as_deref().map(|k| match k {
+                    "ortho" | "orthographic" => "orthographic",
+                    _ => "perspective",
+                }),
+                view: args.view,
+                azimuth: args.azimuth,
+                elevation: args.elevation,
+                up: args.up,
+                fov: args.fov,
+                zoom: args.zoom,
+                distance: args.distance,
+                light: args.light,
+                wireframe: args.wireframe,
+                background: args.background.map(|c| {
+                    [
+                        (c[0] * 255.0) as u8,
+                        (c[1] * 255.0) as u8,
+                        (c[2] * 255.0) as u8,
+                        (c[3] * 255.0) as u8,
+                    ]
+                }),
+                transparent: false,
+            };
             return run_screenshot(
-                mesh,
-                config.as_deref(),
-                views,
-                out_dir.as_deref(),
-                prefix.as_deref(),
-                *size,
+                &args.mesh,
+                args.config.as_deref(),
+                &opts,
+                &args.views,
+                args.out_dir.as_deref(),
+                args.prefix.as_deref(),
+                args.size,
             );
         }
         None => {}
@@ -709,21 +839,49 @@ mod tests {
         ])
         .unwrap();
         match cli.command {
-            Some(Commands::Screenshot {
-                mesh,
-                views,
-                out_dir,
-                prefix,
-                size,
-                ..
-            }) => {
-                assert_eq!(mesh, PathBuf::from("m.ply"));
-                assert!(matches!(views, ViewSet::Ring(8)));
-                assert_eq!(out_dir, Some(PathBuf::from("/tmp/shots")));
-                assert_eq!(prefix.as_deref(), Some("gear"));
-                assert_eq!(size, (800, 600));
+            Some(Commands::Screenshot(args)) => {
+                assert_eq!(args.mesh.len(), 1);
+                assert_eq!(args.mesh[0].path, "m.ply");
+                assert!(matches!(args.views, ViewSet::Ring(8)));
+                assert_eq!(args.out_dir, Some(PathBuf::from("/tmp/shots")));
+                assert_eq!(args.prefix.as_deref(), Some("gear"));
+                assert_eq!(args.size, (800, 600));
             }
             other => panic!("screenshot must parse as a subcommand, not {other:?}"),
+        }
+    }
+    #[test]
+    fn screenshot_parses_mesh_specs_and_camera_flags() {
+        let cli = parse(&[
+            "meshtui",
+            "screenshot",
+            "gear=a.ply:color=#ff0000:alpha=0.5",
+            "b.ply:visible=false",
+            "--camera",
+            "persp",
+            "--azimuth",
+            "45",
+            "--up",
+            "0,0,1",
+            "--zoom",
+            "0.8",
+            "--views",
+            "grid",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::Screenshot(args)) => {
+                assert_eq!(args.mesh.len(), 2);
+                assert_eq!(args.mesh[0].name.as_deref(), Some("gear"));
+                assert_eq!(args.mesh[0].color, Some([1.0, 0.0, 0.0, 1.0]));
+                assert_eq!(args.mesh[1].visible, Some(false));
+                assert_eq!(args.camera.as_deref(), Some("persp"));
+                assert_eq!(args.azimuth, Some(45.0));
+                assert_eq!(args.up, Some(glam::Vec3::Z));
+                assert_eq!(args.zoom, Some(0.8));
+                assert!(matches!(args.views, ViewSet::Grid));
+            }
+            other => panic!("expected screenshot, got {other:?}"),
         }
     }
 
