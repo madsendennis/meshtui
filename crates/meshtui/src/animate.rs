@@ -627,19 +627,22 @@ fn apply_transform(mesh: &mut meshtui_core::Mesh, entry: &MeshEntry, base: Optio
 }
 
 /// Composite a raw frame over the background (no-op when transparent).
-fn composite_frame(mut pixels: Vec<u8>, background: Option<Color>) -> Vec<u8> {
+/// Composite a raw frame over the background (no-op when transparent).
+/// `background` is linear 0..1 floats; `pixels` are sRGB u8.
+pub(crate) fn composite_frame(mut pixels: Vec<u8>, background: Option<Color>) -> Vec<u8> {
     let Some(bg) = background else { return pixels };
     let (r, g, b) = (bg[0], bg[1], bg[2]);
     for px in pixels.as_chunks_mut::<4>().0.iter_mut() {
         let a = px[3] as f32 / 255.0;
         if a < 1.0 {
-            px[0] = (px[0] as f32 / 255.0 * a + r * (1.0 - a))
+            // out = fg*a + bg*(1-a), computed in 0..1 then mapped to u8.
+            px[0] = ((px[0] as f32 / 255.0 * a + r * (1.0 - a)) * 255.0)
                 .round()
                 .clamp(0.0, 255.0) as u8;
-            px[1] = (px[1] as f32 / 255.0 * a + g * (1.0 - a))
+            px[1] = ((px[1] as f32 / 255.0 * a + g * (1.0 - a)) * 255.0)
                 .round()
                 .clamp(0.0, 255.0) as u8;
-            px[2] = (px[2] as f32 / 255.0 * a + b * (1.0 - a))
+            px[2] = ((px[2] as f32 / 255.0 * a + b * (1.0 - a)) * 255.0)
                 .round()
                 .clamp(0.0, 255.0) as u8;
             px[3] = 255;
@@ -995,6 +998,24 @@ cuts:
         apply_cut_tweened(&mut app, &before, &cut, 1.0, &mut state, false).unwrap();
         assert!(app.camera.orientation.dot(q1).abs() > 0.999_999);
         assert_eq!(app.camera.target, glam::Vec3::new(2.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn composite_frame_blends_u8_pixels_over_unit_float_background() {
+        // Regression: the background is 0..1 floats while pixels are u8 —
+        // the blend must scale back to 0..255 (it used to round 0..1 to 0/1).
+        let pixels = vec![0, 0, 0, 0, 255, 0, 0, 255, 255, 0, 0, 128];
+        let out = composite_frame(pixels, Some([0.2, 0.4, 0.6, 1.0]));
+        assert_eq!(
+            &out[..4],
+            &[51, 102, 153, 255],
+            "fully transparent shows the background"
+        );
+        assert_eq!(&out[4..8], &[255, 0, 0, 255], "opaque passes through");
+        let blended = out[8] as f32 / 255.0;
+        let a = 128.0 / 255.0;
+        let expect = 1.0 * a + 0.2 * (1.0 - a);
+        assert!((blended - expect).abs() < 1.0 / 255.0, "got {blended}");
     }
 
     #[test]
