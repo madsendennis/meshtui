@@ -41,8 +41,7 @@ pub struct SoftwareRasterizer {
     pub options: Options,
 }
 
-/// Front + backdrop color/depth for one tile (backdrop enables
-/// transparency-over-mesh compositing).
+/// Opaque scene + nearest transparent surface for one tile.
 type TileBuffers = (Vec<[u8; 4]>, Vec<f32>, Vec<[u8; 4]>, Vec<f32>);
 
 impl RenderBackend for SoftwareRasterizer {
@@ -75,6 +74,7 @@ impl RenderBackend for SoftwareRasterizer {
         let hh = height as f32 * 0.5;
         let screen_tris: Vec<ScreenTri> = meshes
             .par_iter()
+            .filter(|mesh| mesh.color[3] > 0.0)
             .flat_map_iter(|mesh| {
                 let linear_color = [
                     srgb_to_linear(mesh.color[0]),
@@ -111,8 +111,9 @@ impl RenderBackend for SoftwareRasterizer {
             }
         }
 
-        // 3. Per-tile color+depth buffers (front + backdrop), rasterized in
-        //    parallel; each tile only visits its own binned triangles.
+        // 3. Render opaque geometry first, then keep the nearest transparent
+        //    surface separately. This guarantees a closed transparent mesh's
+        //    own back shell cannot displace the opaque mesh behind it.
         let tiles: Vec<TileBuffers> = bins
             .into_par_iter()
             .enumerate()
@@ -123,11 +124,14 @@ impl RenderBackend for SoftwareRasterizer {
                 let y0 = ty * TILE;
                 let tw = (width - x0).min(TILE) as usize;
                 let th = (height - y0).min(TILE) as usize;
-                let mut color = vec![[0u8; 4]; tw * th];
-                let mut depth = vec![f32::INFINITY; tw * th];
-                let mut back_color = vec![[0u8; 4]; tw * th];
-                let mut back_depth = vec![f32::INFINITY; tw * th];
-                for &i in &tris {
+                let mut opaque_color = vec![[0u8; 4]; tw * th];
+                let mut opaque_depth = vec![f32::INFINITY; tw * th];
+                let mut transparent_color = vec![[0u8; 4]; tw * th];
+                let mut transparent_depth = vec![f32::INFINITY; tw * th];
+                for &i in tris
+                    .iter()
+                    .filter(|&&i| screen_tris[i as usize].linear_color[3] >= 1.0)
+                {
                     raster_triangle(
                         &screen_tris[i as usize],
                         eye,
@@ -138,22 +142,43 @@ impl RenderBackend for SoftwareRasterizer {
                         y0,
                         tw,
                         th,
-                        &mut color,
-                        &mut depth,
-                        &mut back_color,
-                        &mut back_depth,
+                        &mut opaque_color,
+                        &mut opaque_depth,
+                        None,
                     );
                 }
-                (color, depth, back_color, back_depth)
+                for &i in tris.iter().filter(|&&i| {
+                    let alpha = screen_tris[i as usize].linear_color[3];
+                    alpha > 0.0 && alpha < 1.0
+                }) {
+                    raster_triangle(
+                        &screen_tris[i as usize],
+                        eye,
+                        camera_dir,
+                        orthographic,
+                        &self.options,
+                        x0,
+                        y0,
+                        tw,
+                        th,
+                        &mut transparent_color,
+                        &mut transparent_depth,
+                        Some(&opaque_depth),
+                    );
+                }
+                (
+                    opaque_color,
+                    opaque_depth,
+                    transparent_color,
+                    transparent_depth,
+                )
             })
             .collect();
 
-        // Merge tiles into the final frame. A transparent front surface is
-        // composited over the backdrop (the nearest surface behind it), so a
-        // translucent front mesh reveals the mesh behind — not empty
-        // background. Opaque fronts ignore the backdrop.
+        // Composite the nearest transparent surface over the already-complete
+        // opaque scene. Fully transparent meshes never entered either pass.
         let mut frame = Frame::new(width, height)?;
-        for (tile_idx, (color, _depth, back, _bdepth)) in tiles.iter().enumerate() {
+        for (tile_idx, (opaque, _odepth, transparent, _tdepth)) in tiles.iter().enumerate() {
             let tx = tile_idx as u32 % tiles_x;
             let ty = tile_idx as u32 / tiles_x;
             let x0 = tx * TILE;
@@ -164,32 +189,7 @@ impl RenderBackend for SoftwareRasterizer {
                 let dst = ((y0 as usize + row) * w + x0 as usize) * 4;
                 let src = row * tw;
                 for col in 0..tw {
-                    let front = color[src + col];
-                    let a = front[3];
-                    // Composite a semi-transparent front over the backdrop
-                    // (the nearest surface behind it). Opaque or empty front
-                    // passes through unchanged.
-                    let c = if a < 255 {
-                        let b = back[src + col];
-                        let fa = a as f32 / 255.0;
-                        let ba = b[3] as f32 / 255.0;
-                        let out_a = fa + ba * (1.0 - fa);
-                        if out_a <= f32::EPSILON {
-                            [0, 0, 0, 0]
-                        } else {
-                            [
-                                ((front[0] as f32 * fa + b[0] as f32 * ba * (1.0 - fa)) / out_a)
-                                    .round() as u8,
-                                ((front[1] as f32 * fa + b[1] as f32 * ba * (1.0 - fa)) / out_a)
-                                    .round() as u8,
-                                ((front[2] as f32 * fa + b[2] as f32 * ba * (1.0 - fa)) / out_a)
-                                    .round() as u8,
-                                (out_a * 255.0).round() as u8,
-                            ]
-                        }
-                    } else {
-                        front
-                    };
+                    let c = blend_over(transparent[src + col], opaque[src + col]);
                     let d = dst + col * 4;
                     frame.pixels[d..d + 4].copy_from_slice(&c);
                 }
@@ -367,11 +367,10 @@ fn raster_triangle(
     tile_h: usize,
     out_color: &mut [[u8; 4]],
     out_depth: &mut [f32],
-    // Second (backdrop) layer: the nearest surface behind the front one, so a
-    // transparent front triangle composites over the mesh behind it instead
-    // of over empty background.
-    back_color: &mut [[u8; 4]],
-    back_depth: &mut [f32],
+    // Opaque depth buffer when rasterizing the transparent pass. Transparent
+    // fragments behind an opaque surface are discarded; transparent
+    // fragments in front never modify opaque depth.
+    opaque_depth: Option<&[f32]>,
 ) {
     let (s0, s1, s2) = (tri.s0, tri.s1, tri.s2);
     // Screen-space bbox clipped to the tile. Compute in i32 and clamp to
@@ -410,10 +409,12 @@ fn raster_triangle(
             }
             let z = w0 * z0 + w1 * z1 + w2 * z2;
             let idx = (y as u32 - tile_y) as usize * tile_w + (x as u32 - tile_x) as usize;
-            if z >= back_depth[idx] {
-                continue; // behind the backdrop too: fully occluded
+            if opaque_depth.is_some_and(|depth| z >= depth[idx]) {
+                continue;
             }
-            let in_front = z < out_depth[idx];
+            if z >= out_depth[idx] {
+                continue;
+            }
 
             // Perspective-correct world-space normal.
             let n =
@@ -438,21 +439,32 @@ fn raster_triangle(
             let is_wire = opts.wireframe_thickness > 0.0
                 && wire_distance(s0, s1, s2, p) < opts.wireframe_thickness;
             let color = if is_wire { opts.wireframe_color } else { px };
-
-            if in_front {
-                // Demote the current front to the backdrop, then this becomes
-                // the new front.
-                back_color[idx] = out_color[idx];
-                back_depth[idx] = out_depth[idx];
-                out_color[idx] = color;
-                out_depth[idx] = z;
-            } else {
-                // Nearest surface behind the front: the new backdrop.
-                back_color[idx] = color;
-                back_depth[idx] = z;
-            }
+            out_color[idx] = color;
+            out_depth[idx] = z;
         }
     }
+}
+
+/// Straight-alpha "source over destination" compositing.
+fn blend_over(front: [u8; 4], back: [u8; 4]) -> [u8; 4] {
+    if front[3] == 0 {
+        return back;
+    }
+    if front[3] == 255 {
+        return front;
+    }
+    let fa = front[3] as f32 / 255.0;
+    let ba = back[3] as f32 / 255.0;
+    let out_a = fa + ba * (1.0 - fa);
+    if out_a <= f32::EPSILON {
+        return [0, 0, 0, 0];
+    }
+    [
+        ((front[0] as f32 * fa + back[0] as f32 * ba * (1.0 - fa)) / out_a).round() as u8,
+        ((front[1] as f32 * fa + back[1] as f32 * ba * (1.0 - fa)) / out_a).round() as u8,
+        ((front[2] as f32 * fa + back[2] as f32 * ba * (1.0 - fa)) / out_a).round() as u8,
+        (out_a * 255.0).round() as u8,
+    ]
 }
 
 fn direction_to_eye(eye: Vec3, world: Vec3, fallback: Vec3) -> Vec3 {
@@ -610,6 +622,45 @@ mod tests {
         s
     }
 
+    fn quad_mesh(name: &str, z_values: &[f32], color: [f32; 4]) -> Mesh {
+        let mut mesh = Mesh::new(name);
+        for &z in z_values {
+            let base = mesh.positions.len() as u32;
+            mesh.positions.extend([
+                Vec3::new(-1.0, -1.0, z),
+                Vec3::new(1.0, -1.0, z),
+                Vec3::new(1.0, 1.0, z),
+                Vec3::new(-1.0, 1.0, z),
+            ]);
+            mesh.normals.extend([Vec3::Z; 4]);
+            mesh.indices
+                .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+        mesh.color = color;
+        mesh
+    }
+
+    fn unlit_opts() -> Options {
+        let mut options = opts();
+        options.lighting.ambient = [std::f32::consts::PI; 3];
+        options.lighting.key_intensity = 0.0;
+        options.lighting.fill_intensity = 0.0;
+        options.lighting.rim_intensity = 0.0;
+        options
+    }
+
+    fn fixed_camera() -> Camera {
+        let mut camera = Camera::frame_bounds(
+            Vec3::new(-1.0, -1.0, -1.0),
+            Vec3::new(1.0, 1.0, 1.0),
+            CameraKind::Perspective,
+            60.0,
+            1.2,
+        );
+        camera.set_view_axis(meshtui_core::ViewAxis::PosZ);
+        camera
+    }
+
     #[test]
     fn renders_center_pixel() {
         let scene = quad_scene();
@@ -641,6 +692,49 @@ mod tests {
         let a = frame.pixels[center + 3];
         assert!(a < 255, "semi-transparent alpha, got {a}");
         assert!(a > 100, "alpha accumulates over empty bg, got {a}");
+    }
+
+    #[test]
+    fn alpha_zero_closed_shell_does_not_occlude_opaque_mesh() {
+        let mut opaque_only = Scene::new();
+        opaque_only
+            .meshes
+            .push(quad_mesh("opaque", &[0.0], [0.0, 0.0, 1.0, 1.0]));
+
+        let mut with_shell = opaque_only.clone();
+        with_shell.meshes.push(quad_mesh(
+            "transparent-shell",
+            &[0.5, 0.25],
+            [1.0, 0.0, 0.0, 0.0],
+        ));
+
+        let camera = fixed_camera();
+        let mut renderer = SoftwareRasterizer {
+            options: unlit_opts(),
+        };
+        let expected = renderer.render(&opaque_only, &camera, 64, 64).unwrap();
+        let actual = renderer.render(&with_shell, &camera, 64, 64).unwrap();
+        assert_eq!(actual.pixels, expected.pixels);
+    }
+
+    #[test]
+    fn translucent_closed_shell_reveals_opaque_mesh() {
+        let mut scene = Scene::new();
+        scene
+            .meshes
+            .push(quad_mesh("opaque", &[0.0], [0.0, 0.0, 1.0, 1.0]));
+        scene.meshes.push(quad_mesh(
+            "transparent-shell",
+            &[0.5, 0.25],
+            [1.0, 0.0, 0.0, 0.5],
+        ));
+
+        let mut renderer = SoftwareRasterizer {
+            options: unlit_opts(),
+        };
+        let frame = renderer.render(&scene, &fixed_camera(), 64, 64).unwrap();
+        let center = (32 * 64 + 32) * 4;
+        assert_eq!(&frame.pixels[center..center + 4], &[127, 0, 128, 255]);
     }
 
     #[test]
@@ -798,8 +892,6 @@ mod tests {
         options.lighting.rim_intensity = 0.0;
         let mut color = vec![[0; 4]; 9];
         let mut depth = vec![f32::INFINITY; 9];
-        let mut back_color = vec![[0; 4]; 9];
-        let mut back_depth = vec![f32::INFINITY; 9];
         for tri in [&far_slanted, &near_flat] {
             raster_triangle(
                 tri,
@@ -813,8 +905,7 @@ mod tests {
                 3,
                 &mut color,
                 &mut depth,
-                &mut back_color,
-                &mut back_depth,
+                None,
             );
         }
         assert_eq!(color[0], [0, 0, 255, 255]);
