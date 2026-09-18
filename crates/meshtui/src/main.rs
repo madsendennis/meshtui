@@ -143,10 +143,12 @@ enum Commands {
         #[arg(long, value_name = "DIR")]
         frames_dir: Option<PathBuf>,
     },
-    /// Manage the agent skill (SKILL.md): print it, or install it for your
-    /// coding agents
-    #[command(subcommand)]
-    Skill(SkillCommands),
+    /// Manage the agent skill (SKILL.md): bare `meshtui skill` prints it;
+    /// `install`/`uninstall` manage it for your coding agents
+    Skill {
+        #[command(subcommand)]
+        command: Option<SkillCommands>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -167,7 +169,16 @@ enum SkillCommands {
         dry_run: bool,
     },
     /// Remove a skill previously installed by `meshtui skill install`
-    Uninstall,
+    Uninstall {
+        /// Skills directory the skill was installed to (default:
+        /// ~/.agents/skills). Must match the --dir used at install time.
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+        /// Also remove links from these agent dirs (default: auto-detected).
+        /// Must cover any --agent used at install time.
+        #[arg(long, value_name = "AGENT")]
+        agent: Vec<String>,
+    },
 }
 
 /// Args for `meshtui screenshot` (boxed in the enum to keep it small).
@@ -308,8 +319,11 @@ fn is_scene_file(path: &Path) -> bool {
     )
 }
 
-/// Apply a scene file's camera/light/wireframe to a freshly built App.
-fn apply_scene_camera(app: &mut app::App, file: &meshtui_core::SceneFile) {
+/// Apply a scene file's camera POSE (kind/fov/up/view/azimuth/elevation).
+/// Must run BEFORE `App::set_aspect` so the one-time auto-fit computes its
+/// distance from the final projection and view direction, not config
+/// defaults. Also captures the base pose for absolute animation cuts.
+pub(crate) fn apply_scene_camera_pose(app: &mut app::App, file: &meshtui_core::SceneFile) {
     let cam = &file.camera;
     if let Some(kind) = file.camera_kind() {
         app.camera.kind = kind;
@@ -318,13 +332,15 @@ fn apply_scene_camera(app: &mut app::App, file: &meshtui_core::SceneFile) {
         app.camera.fov_degrees = fov;
     }
     if let Some(up) = cam.up {
-        app.camera.set_up(glam::Vec3::from(up));
+        let up = glam::Vec3::from(up);
+        app.camera.set_up(up);
+        app.base_up = up.normalize_or(glam::Vec3::Y);
     }
     if let Some(view) = cam.view.as_deref().and_then(ViewAxis::parse) {
         app.camera.set_view_axis(view);
     }
     if cam.azimuth.is_some() || cam.elevation.is_some() {
-        headless::apply_headless(
+        headless::apply_headless_pose(
             app,
             &HeadlessOpts {
                 azimuth: cam.azimuth,
@@ -333,12 +349,18 @@ fn apply_scene_camera(app: &mut app::App, file: &meshtui_core::SceneFile) {
             },
         );
     }
-    if let Some(zoom) = cam.zoom {
-        app.camera.zoom(zoom);
-    }
-    if let Some(distance) = cam.distance {
-        app.camera.distance = distance.max(1e-3);
-    }
+    // The fully posed camera is the reference for absolute
+    // azimuth_to/elevation_to animation cuts.
+    app.base_orientation = app.camera.orientation;
+}
+
+/// Apply a scene file's post-fit camera (zoom/distance) and scene settings
+/// (light/wireframe). Must run AFTER the one-time auto-fit, which resets
+/// distance/ortho_scale; `App::apply_post_fit_camera` defers zoom/distance
+/// when the fit hasn't happened yet (TUI scene open).
+pub(crate) fn apply_scene_camera_post(app: &mut app::App, file: &meshtui_core::SceneFile) {
+    let cam = &file.camera;
+    app.apply_post_fit_camera(cam.zoom, cam.distance);
     if let Some(light) = file.light {
         app.set_light_scale(light);
     }
@@ -367,6 +389,7 @@ fn print_capabilities() {
                 "about": "render mesh(es) to PNG(s); full headless scene control",
                 "mesh_spec": "[name=]path[:color=NAME|#RRGGBB[AA]][:alpha=0..1][:visible=bool]",
                 "views": ["all", "iso", "grid", "ring:N (2..=64)"],
+                "single_view": "a bare --view without --views renders one PNG (negative axes need = form: --view=-x)",
                 "camera": ["--camera ortho|persp", "--view +x|-x|+y|-y|+z|-z", "--azimuth DEG", "--elevation DEG", "--up X,Y,Z", "--fov DEG", "--zoom FACTOR", "--distance D"],
                 "scene": ["--light 0..4", "--wireframe PX", "--background #RRGGBB[AA]", "--size WxH", "--out-dir DIR", "--prefix NAME"],
             },
@@ -379,11 +402,17 @@ fn print_capabilities() {
             "animate": {
                 "about": "render a base scene + scene cuts to a looping GIF",
                 "cuts": "top level is the scene-file format plus fps/frames/cuts; each cut holds N frames and changes only what it names; state persists across cuts",
+                "cut_keys": ["frames", "tween", "ease", "camera", "meshes", "light", "wireframe"],
+                "cut_camera_keys": ["view", "azimuth", "elevation", "azimuth_to", "elevation_to", "up", "zoom", "distance", "kind", "fov"],
                 "cut_semantics": {
-                    "camera": "RELATIVE deltas that accumulate across cuts: azimuth/elevation add to the pose, zoom multiplies (two cuts of zoom:2 = 4x)",
+                    "camera": "RELATIVE deltas that accumulate across cuts: azimuth/elevation add to the pose, zoom multiplies (two cuts of zoom:2 = 4x). azimuth_to/elevation_to are ABSOLUTE poses measured from the base view, ignoring earlier cuts.",
                     "meshes": "ABSOLUTE replacement: color/alpha/visible/scale/translate set the value (not a delta); a mesh entry with `path` reloads that mesh's geometry",
+                    "tween": "tween: true interpolates the cut's changes over its frames (ease: linear|in|out|inout); every frame derives from the pre-cut state, so values never compound",
                 },
                 "frames_dir": "--frames-dir DIR writes numbered PNGs (combine with -o to also emit the GIF in one render pass)",
+            },
+            "skill": {
+                "about": "manage the agent skill (SKILL.md): bare `meshtui skill` prints it, `skill install [--dir D] [--agent A] [--dry-run]` installs to ~/.agents/skills/meshtui and links into detected agent dirs, `skill uninstall [--dir D] [--agent A]` removes what install wrote",
             },
         },
         "scene_file_open": "passing a .yaml/.yml as the mesh argument opens that scene in the TUI",
@@ -419,19 +448,19 @@ fn detected_agent_dirs() -> Vec<(&'static str, PathBuf)> {
     out
 }
 
-/// `meshtui skill print|install|uninstall`.
-fn run_skill(cmd: &SkillCommands) -> Result<(), String> {
+/// `meshtui skill [print|install|uninstall]`; bare `meshtui skill` prints.
+fn run_skill(cmd: Option<&SkillCommands>) -> Result<(), String> {
     match cmd {
-        SkillCommands::Print => {
+        None | Some(SkillCommands::Print) => {
             print!("{SKILL_BODY}");
             Ok(())
         }
-        SkillCommands::Install {
+        Some(SkillCommands::Install {
             dir,
             agent,
             dry_run,
-        } => skill_install(dir.as_deref(), agent, *dry_run),
-        SkillCommands::Uninstall => skill_uninstall(),
+        }) => skill_install(dir.as_deref(), agent, *dry_run),
+        Some(SkillCommands::Uninstall { dir, agent }) => skill_uninstall(dir.as_deref(), agent),
     }
 }
 
@@ -463,21 +492,8 @@ fn skill_install(dir: Option<&Path>, agents: &[String], dry_run: bool) -> Result
     }
     actions.push(format!("write {}", skill_file.display()));
 
-    // Symlink into detected (or requested) agent dirs.
-    let requested: Vec<(String, PathBuf)> = if agents.is_empty() {
-        detected_agent_dirs()
-            .into_iter()
-            .map(|(n, p)| (n.to_string(), p))
-            .collect()
-    } else {
-        agents
-            .iter()
-            .map(|a| {
-                let home = dirs::home_dir().unwrap_or_default();
-                (a.clone(), home.join(format!(".{a}/skills")))
-            })
-            .collect()
-    };
+    // Symlink into detected agent dirs PLUS any explicitly requested ones.
+    let requested = agent_skill_dirs(agents);
     for (name, agent_skills) in requested {
         let link = agent_skills.join("meshtui");
         if link.exists() || link.symlink_metadata().is_ok() {
@@ -519,8 +535,29 @@ fn skill_install(dir: Option<&Path>, agents: &[String], dry_run: bool) -> Result
     Ok(())
 }
 
-fn skill_uninstall() -> Result<(), String> {
-    let base = default_skills_dir()?;
+/// Agent skill dirs to link into / unlink from: auto-detected existing dirs
+/// PLUS any explicitly requested agents, deduplicated by path.
+fn agent_skill_dirs(explicit: &[String]) -> Vec<(String, PathBuf)> {
+    let mut out: Vec<(String, PathBuf)> = detected_agent_dirs()
+        .into_iter()
+        .map(|(n, p)| (n.to_string(), p))
+        .collect();
+    if let Some(home) = dirs::home_dir() {
+        for a in explicit {
+            let dir = home.join(format!(".{a}/skills"));
+            if !out.iter().any(|(_, p)| *p == dir) {
+                out.push((a.clone(), dir));
+            }
+        }
+    }
+    out
+}
+
+fn skill_uninstall(dir: Option<&Path>, agents: &[String]) -> Result<(), String> {
+    let base = dir
+        .map(PathBuf::from)
+        .map(Ok)
+        .unwrap_or_else(default_skills_dir)?;
     let skill_dir = base.join("meshtui");
     if !skill_dir.join(SKILL_MARKER).exists() {
         return Err(format!(
@@ -529,7 +566,7 @@ fn skill_uninstall() -> Result<(), String> {
         ));
     }
     // Remove symlinks in agent dirs that point at our skill, then the skill.
-    for (_, agent_skills) in detected_agent_dirs() {
+    for (_, agent_skills) in agent_skill_dirs(agents) {
         let link = agent_skills.join("meshtui");
         if link.symlink_metadata().is_ok()
             && link
@@ -562,10 +599,11 @@ fn run_render(
     let (w, h) = size
         .or_else(|| file.output.size.map(|[a, b]| (a, b)))
         .unwrap_or((1600, 1200));
-    // Fit to the viewport first, then apply the scene's camera so zoom/scale
-    // aren't cancelled by the one-time auto-fit (which resets ortho_scale).
+    // Pose first (so the fit uses the scene's projection/view), then the
+    // one-time fit, then zoom/distance so the fit doesn't cancel them.
+    apply_scene_camera_pose(&mut app, &file);
     app.set_aspect(w as f32 / h as f32);
-    apply_scene_camera(&mut app, &file);
+    apply_scene_camera_post(&mut app, &file);
     let transparent = transparent || file.output.transparent.unwrap_or(false);
     let background = if transparent {
         None
@@ -909,7 +947,16 @@ fn run_screenshot(
         .unwrap_or_else(|| glam::Vec3::from(config.view.up_vectors[0]));
 
     let mut app = app::App::new(scene, config);
-    headless::apply_headless(&mut app, opts);
+    // Pose first, then the one-time fit at the OUTPUT aspect (a grid fits to
+    // its cell aspect), then zoom/distance so the fit doesn't cancel them.
+    headless::apply_headless_pose(&mut app, opts);
+    let (fit_w, fit_h) = if matches!(set, ViewSet::Grid) {
+        ((size.0 / 3).max(1), (size.1 / 2).max(1))
+    } else {
+        size
+    };
+    app.set_aspect(fit_w as f32 / fit_h as f32);
+    headless::apply_headless_post(&mut app, opts);
 
     let prefix = prefix.map(String::from).unwrap_or_else(|| {
         Path::new(&specs[0].path)
@@ -1023,7 +1070,6 @@ fn write_view_grid(
     let (w, h) = size;
     let cell_w = (w / 3).max(1);
     let cell_h = (h / 2).max(1);
-    app.set_aspect(cell_w as f32 / cell_h as f32);
     let mut pixels = vec![0u8; (w * h * 4) as usize];
     for (i, spec) in view_specs(&ViewSet::All, up).iter().enumerate() {
         pose_camera(app, spec);
@@ -1111,7 +1157,7 @@ fn run(cli: Cli) -> Result<(), String> {
         }
         Some(Commands::Render { .. }) => {}  // handled below
         Some(Commands::Animate { .. }) => {} // handled below
-        Some(Commands::Skill(cmd)) => return run_skill(cmd),
+        Some(Commands::Skill { command }) => return run_skill(command.as_ref()),
         None => {}
     }
 
@@ -1188,7 +1234,10 @@ fn run(cli: Cli) -> Result<(), String> {
         let file = meshtui_core::scene_file::load(&cli.meshes[0]).map_err(|e| e.to_string())?;
         let scene = file.build_scene().map_err(|e| e.to_string())?;
         let mut app = app::App::new(scene, config);
-        apply_scene_camera(&mut app, &file);
+        // Pose now; zoom/distance defer until the one-time fit (inside the
+        // TUI's first frame, or the explicit set_aspect for a screenshot).
+        apply_scene_camera_pose(&mut app, &file);
+        apply_scene_camera_post(&mut app, &file);
         return match cli.screenshot {
             Some(path) => {
                 let (w, h) = file.output.size.map(|[a, b]| (a, b)).unwrap_or(cli.size);

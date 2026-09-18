@@ -95,9 +95,17 @@ pub struct App {
     /// Viewport pixel aspect (width/height) used to fit the camera so meshes
     /// fill wide viewports instead of swimming. 1.0 until the first render.
     aspect: f32,
-    /// The base view pose for absolute `azimuth_to`/`elevation_to` cut
-    /// overrides (set from the scene's camera.view, else the default axis).
-    pub base_view: Option<ViewAxis>,
+    /// The base camera pose, captured after scene-camera setup. Absolute
+    /// `azimuth_to`/`elevation_to` animation cuts reset to this orientation,
+    /// so they work even when the scene never named a view axis.
+    pub base_orientation: glam::Quat,
+    /// The persistent world up axis orbits turn around (from config or the
+    /// scene's camera.up). Not the camera's mutable, possibly tilted up.
+    pub base_up: Vec3,
+    /// Scene zoom/distance waiting for the one-time auto-fit (TUI scene
+    /// open applies the camera before the terminal aspect is known).
+    pending_zoom: Option<f32>,
+    pending_distance: Option<f32>,
     dirty: bool,
     render_dirty: bool,
 }
@@ -175,6 +183,16 @@ impl App {
             .unwrap_or(0);
         let filtered_indices =
             filter_mesh_indices(&scene, "").expect("an empty mesh filter is always valid");
+        let base_orientation = camera.orientation;
+        let base_up = Vec3::from(
+            config
+                .view
+                .up_vectors
+                .first()
+                .copied()
+                .unwrap_or([0.0, 1.0, 0.0]),
+        )
+        .normalize_or(Vec3::Y);
         Self {
             scene,
             camera,
@@ -194,7 +212,10 @@ impl App {
             theme,
             status_message: None,
             aspect: -1.0, // sentinel: unset until set_aspect() before first frame
-            base_view: None,
+            base_orientation,
+            base_up,
+            pending_zoom: None,
+            pending_distance: None,
             dirty: true,
             render_dirty: true,
         }
@@ -222,7 +243,33 @@ impl App {
                 aspect,
             );
         }
+        // The fit resets distance/ortho_scale, so deferred scene zoom and
+        // distance must be re-applied on top of it.
+        if let Some(zoom) = self.pending_zoom.take() {
+            self.camera.zoom(zoom);
+        }
+        if let Some(distance) = self.pending_distance.take() {
+            self.camera.distance = distance.max(1e-3);
+        }
         self.render_dirty = true;
+    }
+
+    /// Apply scene zoom/distance AFTER the one-time auto-fit (the fit would
+    /// cancel them). Applies immediately when the fit already happened;
+    /// otherwise deferred until `set_aspect` runs (TUI scene open, where the
+    /// terminal aspect is unknown until the first frame).
+    pub fn apply_post_fit_camera(&mut self, zoom: Option<f32>, distance: Option<f32>) {
+        if self.aspect >= 0.0 {
+            if let Some(zoom) = zoom {
+                self.camera.zoom(zoom);
+            }
+            if let Some(distance) = distance {
+                self.camera.distance = distance.max(1e-3);
+            }
+        } else {
+            self.pending_zoom = zoom;
+            self.pending_distance = distance;
+        }
     }
 
     /// Re-resolve the theme (omarchy live-reload) and restyle without a
@@ -758,9 +805,19 @@ impl App {
         self.light_scale = scale.clamp(0.0, 4.0);
     }
 
+    /// Current light intensity scale.
+    pub fn light_scale(&self) -> f32 {
+        self.light_scale
+    }
+
     /// Set the wireframe overlay thickness in pixels (0 disables).
     pub fn set_wireframe_thickness(&mut self, thickness: f32) {
         self.wireframe_thickness = thickness.clamp(0.0, 10.0);
+    }
+
+    /// Current wireframe overlay thickness in pixels.
+    pub fn wireframe_thickness(&self) -> f32 {
+        self.wireframe_thickness
     }
 
     /// Recenter and refit zoom to currently visible meshes, keeping orbit.

@@ -82,16 +82,25 @@ where
         Arr([u32; 2]),
         Str(String),
     }
+    fn check<E: Error>(size: [u32; 2]) -> Result<[u32; 2], E> {
+        // Same bounds as the CLI --size: keeps GIF dimensions within u16 and
+        // prevents absurd allocations.
+        let [w, h] = size;
+        if w == 0 || h == 0 || w > 4096 || h > 4096 {
+            return Err(E::custom("size dimensions must be between 1 and 4096"));
+        }
+        Ok(size)
+    }
     match Option::<Size>::deserialize(d)? {
         None => Ok(None),
-        Some(Size::Arr(a)) => Ok(Some(a)),
+        Some(Size::Arr(a)) => check(a).map(Some),
         Some(Size::Str(s)) => {
             let (w, h) = s
                 .split_once('x')
                 .ok_or_else(|| Error::custom("size must be WxH"))?;
             let w = w.parse().map_err(|_| Error::custom("bad width"))?;
             let h = h.parse().map_err(|_| Error::custom("bad height"))?;
-            Ok(Some([w, h]))
+            check([w, h]).map(Some)
         }
     }
 }
@@ -294,6 +303,16 @@ mod tests {
         assert!(parse_str("meshes: [{path: a.ply}]\nboguskey: 5\n").is_err());
         assert!(parse_str("meshes: [{path: a.ply}]\nzoom_factor: 2\n").is_err());
         assert!(parse_str("meshes: [{path: a.ply, colorr: red}]\n").is_err());
+    }
+
+    #[test]
+    fn size_bounds_match_cli() {
+        use crate::scene_file::parse_str;
+        assert!(parse_str("size: [800, 600]\nmeshes: [{path: a.ply}]\n").is_ok());
+        assert!(parse_str("size: [0, 600]\nmeshes: [{path: a.ply}]\n").is_err());
+        assert!(parse_str("size: [99999, 600]\nmeshes: [{path: a.ply}]\n").is_err());
+        assert!(parse_str("size: \"800x600\"\nmeshes: [{path: a.ply}]\n").is_ok());
+        assert!(parse_str("size: \"65536x1\"\nmeshes: [{path: a.ply}]\n").is_err());
     }
 
     #[test]

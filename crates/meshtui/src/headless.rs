@@ -160,8 +160,10 @@ pub fn load_scene(specs: &[MeshSpec]) -> Result<Scene, String> {
     Ok(scene)
 }
 
-/// Apply camera/scene overrides to a freshly built App.
-pub fn apply_headless(app: &mut App, opts: &HeadlessOpts) {
+/// Apply camera pose overrides (kind/fov/up/view/azimuth/elevation). Run
+/// BEFORE `App::set_aspect` so the one-time auto-fit computes its distance
+/// from the final pose and projection, not the config defaults.
+pub fn apply_headless_pose(app: &mut App, opts: &HeadlessOpts) {
     if let Some(kind) = opts.camera_kind {
         let kind = match kind {
             "ortho" | "orthographic" => meshtui_core::CameraKind::Orthographic,
@@ -179,26 +181,29 @@ pub fn apply_headless(app: &mut App, opts: &HeadlessOpts) {
     // view/azimuth/elevation below build on.
     if let Some(up) = opts.up {
         app.camera.set_up(up);
+        app.base_up = up.normalize_or(Vec3::Y);
     }
     if let Some(axis) = opts.view {
         app.camera.set_view_axis(axis);
     }
     if opts.azimuth.is_some() || opts.elevation.is_some() {
         // Orbit RELATIVE to the current (view) pose: azimuth turns around the
-        // world up axis, elevation tilts around the camera's right axis. The
+        // persistent world up axis (never the camera's mutable, possibly
+        // tilted up), elevation tilts around the camera's right axis. The
         // base view (or default) is the az=0/el=0 reference, so
         // `--view -x --azimuth 180` lands exactly opposite that view.
         let az = opts.azimuth.unwrap_or(0.0).to_radians();
         let el = opts.elevation.unwrap_or(0.0).to_radians();
-        let up = opts.up.unwrap_or_else(|| app.camera.up());
+        let up = opts.up.unwrap_or(app.base_up);
         app.camera.orbit_around(up, az, el);
     }
-    if let Some(zoom) = opts.zoom {
-        app.camera.zoom(zoom);
-    }
-    if let Some(distance) = opts.distance {
-        app.camera.distance = distance.max(1e-3);
-    }
+}
+
+/// Apply post-fit camera (zoom/distance) and scene (light/wireframe)
+/// overrides. Run AFTER `App::set_aspect` — the fit resets distance and
+/// ortho_scale, so applying zoom before it would silently cancel it.
+pub fn apply_headless_post(app: &mut App, opts: &HeadlessOpts) {
+    app.apply_post_fit_camera(opts.zoom, opts.distance);
     if let Some(light) = opts.light {
         app.set_light_scale(light);
     }
