@@ -38,7 +38,7 @@ use crate::{CameraKind, Mesh, Scene};
 /// `background:`, `transparent:`) or nested under `output:`; both populate
 /// `output`.
 #[derive(Debug, Clone, Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SceneFile {
     pub meshes: Vec<MeshEntry>,
     pub camera: CameraSpec,
@@ -59,7 +59,7 @@ pub struct SceneFile {
 
 /// Output/output-composition settings, also settable top-level.
 #[derive(Debug, Clone, Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct OutputSpec {
     /// [width, height] in pixels.
     pub size: Option<[u32; 2]>,
@@ -70,7 +70,7 @@ pub struct OutputSpec {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct CameraSpec {
     pub kind: Option<String>,
     pub view: Option<String>,
@@ -83,6 +83,7 @@ pub struct CameraSpec {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MeshEntry {
     /// Mesh file or directory (`path` or `source` are synonyms). Optional in
     /// animation cuts, where an entry references an already-loaded mesh by
@@ -259,6 +260,14 @@ impl MeshEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deny_unknown_keys() {
+        use crate::scene_file::parse_str;
+        assert!(parse_str("meshes: [{path: a.ply}]\nboguskey: 5\n").is_err());
+        assert!(parse_str("meshes: [{path: a.ply}]\nzoom_factor: 2\n").is_err());
+        assert!(parse_str("meshes: [{path: a.ply, colorr: red}]\n").is_err());
+    }
 
     #[test]
     fn parses_minimal_scene() {
