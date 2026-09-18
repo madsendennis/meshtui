@@ -149,9 +149,10 @@ pub struct App {
     /// each further quit-key press adds a camera cut, and the record-stop
     /// key (`Q`) asks for the GIF duration and writes the animation file.
     recording: Option<Recording>,
-    /// Set by the first quit-key press; the NEXT key resolves it: the quit
-    /// key again starts a recording, escape cancels, anything else quits.
-    pending_quit: bool,
+    /// Set by the first record-key press; the NEXT key resolves it: the
+    /// record key again starts a recording, anything else clears it (and, on
+    /// legacy configs where record shares the quit key, quits).
+    pending_record: bool,
     dirty: bool,
     render_dirty: bool,
 }
@@ -264,7 +265,7 @@ impl App {
             pending_distance: None,
             pending_target: None,
             recording: None,
-            pending_quit: false,
+            pending_record: false,
             auto_zoom: true,
             dirty: true,
             render_dirty: true,
@@ -411,48 +412,71 @@ impl App {
         if self.modal.is_some() {
             return self.handle_modal_key(key);
         }
-        // Animation recording intercepts the quit key: double-tap starts a
-        // recording, further taps add cuts. Plain "quit key, then anything"
-        // still quits, so the habit keeps working.
-        let quit_key = self.config.key("quit").unwrap_or_else(|| "q".into());
+        // Animation recording on the record key (default q): double-tap
+        // starts, further taps add cuts, the stop key (Q) finishes, escape
+        // cancels. Quit moved to esc; legacy configs that still bind
+        // quit = "q" share the key: "q then any other key" keeps quitting.
+        let quit_key = self
+            .config
+            .key("quit")
+            .map(|k| normalize_key(&k).to_string())
+            .unwrap_or_else(|| "escape".into());
+        let record_key = self
+            .config
+            .key("anim_record")
+            .map(|k| normalize_key(&k).to_string())
+            .unwrap_or_else(|| "q".into());
         let stop_key = self
             .config
             .key("anim_record_stop")
+            .map(|k| normalize_key(&k).to_string())
             .unwrap_or_else(|| "Q".into());
-        if self.pending_quit {
-            self.pending_quit = false;
+        let shared_quit = quit_key == record_key;
+        if self.pending_record {
+            self.pending_record = false;
             self.status_message = None;
-            if key == quit_key {
+            if key == record_key {
                 self.start_recording();
                 self.dirty = true;
                 return false;
             }
-            if key == "escape" {
-                self.dirty = true;
-                return false;
+            if shared_quit {
+                if key == "escape" {
+                    self.dirty = true;
+                    return false;
+                }
+                return true; // legacy shared key: record-key + other = quit
             }
-            return true;
+            // Dedicated record key: fall through so the key works normally.
         }
-        if key == quit_key {
+        if key == record_key {
             if self.recording.is_some() {
                 self.record_cut();
             } else {
-                self.pending_quit = true;
+                self.pending_record = true;
                 self.status_message = Some(format!(
-                    "press {} again to start recording · esc cancels · any other key quits",
-                    key_label(&quit_key),
+                    "press {} again to start recording",
+                    key_label(&record_key),
                 ));
             }
             self.dirty = true;
             return false;
         }
-        if self.recording.is_some() && key == stop_key {
-            self.modal = Some(Modal::GifDuration {
-                input: String::new(),
-                error: None,
-            });
-            self.dirty = true;
-            return false;
+        if self.recording.is_some() {
+            if key == stop_key {
+                self.modal = Some(Modal::GifDuration {
+                    input: String::new(),
+                    error: None,
+                });
+                self.dirty = true;
+                return false;
+            }
+            if key == "escape" {
+                self.recording = None;
+                self.status_message = Some("recording cancelled".into());
+                self.dirty = true;
+                return false;
+            }
         }
         if key == "?" {
             self.modal = Some(Modal::CommandPalette {
@@ -471,8 +495,11 @@ impl App {
     fn action_for_key(&self, key: &str) -> Option<String> {
         self.config.keybindings.iter().find_map(|(action, value)| {
             let matches = match value {
-                toml::Value::String(s) => s == key,
-                toml::Value::Array(a) => a.iter().any(|v| v.as_str() == Some(key)),
+                toml::Value::String(s) => normalize_key(s) == key,
+                toml::Value::Array(a) => a
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .any(|v| normalize_key(v) == key),
                 _ => false,
             };
             matches.then_some(action.clone())
@@ -654,6 +681,24 @@ impl App {
                 }
                 self.status_message = Some("animation stopped".into());
                 rerender = self.render_dirty;
+            }
+            "anim_record" => {
+                // Command-palette path: no double-tap needed.
+                if self.recording.is_some() {
+                    self.record_cut();
+                } else {
+                    self.start_recording();
+                }
+                rerender = false;
+            }
+            "anim_record_stop" => {
+                if self.recording.is_some() {
+                    self.modal = Some(Modal::GifDuration {
+                        input: String::new(),
+                        error: None,
+                    });
+                }
+                rerender = false;
             }
             "screenshot" => {
                 let ts = std::time::SystemTime::now()
@@ -986,14 +1031,14 @@ impl App {
         self.recording = Some(Recording {
             poses: vec![RecordedPose::of(&self.camera)],
         });
-        let quit_key = self.config.key("quit").unwrap_or_else(|| "q".into());
+        let record_key = self.config.key("anim_record").unwrap_or_else(|| "q".into());
         let stop_key = self
             .config
             .key("anim_record_stop")
             .unwrap_or_else(|| "Q".into());
         self.status_message = Some(format!(
-            "recording animation — {} adds a cut per camera move, {} finishes",
-            key_label(&quit_key),
+            "recording animation — {} adds a cut per camera move, {} finishes, esc cancels",
+            key_label(&record_key),
             key_label(&stop_key),
         ));
     }
@@ -1359,9 +1404,12 @@ impl App {
                 Some(rec) => format!(" | REC {} cuts", rec.poses.len() - 1),
                 None => String::new(),
             };
+            let quit = key_label(&self.config.key("quit").unwrap_or_else(|| "esc".into()));
             format!(
-                " {kind} | wf:{:.1} | light:{:.1}x | marked:{}{filter}{animation}{fit}{recording} | ? commands | q quit",
-                self.wireframe_thickness, self.light_scale, self.marked.len(),
+                " {kind} | wf:{:.1} | light:{:.1}x | marked:{}{filter}{animation}{fit}{recording} | ? commands | {quit} quit",
+                self.wireframe_thickness,
+                self.light_scale,
+                self.marked.len(),
             )
         });
         f.render_widget(
@@ -1614,6 +1662,14 @@ fn truncate(s: &str, n: usize) -> String {
         s.to_string()
     } else {
         format!("{}…", s.chars().take(n - 1).collect::<String>())
+    }
+}
+
+/// Config files may write "esc"; internally the key is "escape".
+fn normalize_key(key: &str) -> &str {
+    match key {
+        "esc" => "escape",
+        other => other,
     }
 }
 
@@ -2685,19 +2741,22 @@ mod tests {
     }
 
     #[test]
-    fn quit_key_double_tap_records_otherwise_quits() {
-        // q then any other key quits (the plain-quit habit keeps working).
-        let mut app = app_with_meshes(&["mesh"]);
-        assert!(!app.handle_key("q"), "first q only arms the pending state");
-        assert!(app.pending_quit);
-        assert!(app.handle_key("j"), "q then another key quits");
+    fn record_key_double_tap_starts_recording_escape_cancels() {
+        let mut scene = Scene::new();
+        scene.meshes.push(triangle_at("mesh", Vec3::ZERO, 1.0));
+        let mut app = App::new(scene, Config::default());
 
-        // q then escape cancels; q q starts a recording.
-        let mut app = app_with_meshes(&["mesh"]);
+        // q alone does not quit; it arms the recording double-tap.
         assert!(!app.handle_key("q"));
-        assert!(!app.handle_key("escape"));
-        assert!(!app.pending_quit);
+        assert!(app.pending_record);
+        // Another key clears the pending tap and works normally (j orbits).
+        let before = app.camera.orientation;
+        assert!(!app.handle_key("j"));
+        assert_ne!(app.camera.orientation, before);
+        assert!(!app.pending_record);
         assert!(app.recording.is_none());
+
+        // q q starts recording; esc cancels it without quitting the app.
         assert!(!app.handle_key("q"));
         assert!(!app.handle_key("q"));
         assert!(app.recording.is_some(), "double-q starts recording");
@@ -2708,6 +2767,35 @@ mod tests {
                 .contains("recording"),
             "recording announces itself"
         );
+        assert!(!app.handle_key("escape"), "escape cancels, does not quit");
+        assert!(app.recording.is_none());
+        assert_eq!(app.status_message.as_deref(), Some("recording cancelled"));
+
+        // esc quits when not recording.
+        assert!(app.handle_key("escape"));
+    }
+
+    #[test]
+    fn legacy_shared_quit_record_key_keeps_quit() {
+        // Old configs bind quit = "q", which collides with the default record
+        // key — allowed, and "q then any other key" keeps quitting.
+        let mut config = Config::default();
+        config
+            .keybindings
+            .insert("quit".into(), toml::Value::String("q".into()));
+        config.validate_keybindings().unwrap();
+
+        let mut scene = Scene::new();
+        scene.meshes.push(triangle_at("mesh", Vec3::ZERO, 1.0));
+        let mut app = App::new(scene.clone(), config.clone());
+        assert!(!app.handle_key("q"));
+        assert!(app.pending_record);
+        assert!(app.handle_key("j"), "legacy shared key: q then other quits");
+
+        let mut app = App::new(scene, config);
+        app.handle_key("q");
+        app.handle_key("q");
+        assert!(app.recording.is_some(), "double-tap still records");
     }
 
     #[test]

@@ -298,7 +298,7 @@ impl Default for Config {
 
 fn default_keybindings() -> HashMap<String, toml::Value> {
     let pairs: &[(&str, &str)] = &[
-        ("quit", "q"),
+        ("quit", "escape"),
         ("toggle_sidepanel", "tab"),
         ("view_minus_x", "1"),
         ("view_plus_x", "2"),
@@ -325,6 +325,7 @@ fn default_keybindings() -> HashMap<String, toml::Value> {
         ("zoom_in", "z"),
         ("zoom_out", "Z"),
         ("toggle_auto_zoom", ","),
+        ("anim_record", "q"),
         ("anim_record_stop", "Q"),
         ("reset_single_mesh", "r"),
         ("reset_all_meshes", "R"),
@@ -430,11 +431,20 @@ impl Config {
             }
             for key in keys {
                 if let Some(other) = seen.get(&key) {
-                    return Err(ConfigError::DuplicateKey {
-                        key,
-                        first: other.clone(),
-                        second: action.clone(),
-                    });
+                    // Legacy configs bind quit = "q", which is also the
+                    // default record key. That pairing is by design: the
+                    // record double-tap intercepts it and "quit key, then
+                    // any other key" keeps quitting.
+                    let legacy_share = [action.as_str(), other.as_str()]
+                        .iter()
+                        .all(|a| matches!(*a, "quit" | "anim_record"));
+                    if !legacy_share {
+                        return Err(ConfigError::DuplicateKey {
+                            key,
+                            first: other.clone(),
+                            second: action.clone(),
+                        });
+                    }
                 }
                 seen.insert(key, action.clone());
             }

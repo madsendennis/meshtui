@@ -149,6 +149,16 @@ pub const COMMANDS: &[CommandSpec] = &[
         description: "Stop orbit animation",
     },
     CommandSpec {
+        section: "Animation",
+        action: "anim_record",
+        description: "Start animation recording (or add a cut)",
+    },
+    CommandSpec {
+        section: "Animation",
+        action: "anim_record_stop",
+        description: "Finish recording and write animation YAML",
+    },
+    CommandSpec {
         section: "Meshes",
         action: "sidepanel_move_up",
         description: "Select previous mesh",

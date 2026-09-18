@@ -97,12 +97,12 @@ estimated_cell_height_px = 20          # Estimated height of one character cell 
 
 [keybindings]
 # Keybindings for controlling the viewer
-# Keys can be single characters, special keys ("esc", "space", "tab"), or modifier combinations ("ctrl+c")
+# Keys can be single characters, special keys ("escape", "space", "tab", "enter", "backspace", "up"/"down"/"left"/"right"), or modifier combinations ("ctrl+c")
 # Multiple keys can be assigned to the same action using arrays
 # All keys work the same in all states (normal, sidepanel, etc.)
 # Modals (animation, hex input) capture all input
 
-quit = "q"
+quit = "escape"                         # Quit (ctrl+c always works too)
 
 # Sidepanel
 toggle_sidepanel = "tab"
@@ -181,14 +181,12 @@ mesh_undo_delete = "ctrl+z"            # Restore the most recently deleted meshe
 # Animation controls
 animation_start = "a"
 animation_stop = "A"
-# Animation recording builds on the quit key: tap it twice to start
-# recording, tap it once per camera move to add a cut, then press
-# anim_record_stop to finish (asks for the GIF duration and writes a YAML
-# animation file). Plain "quit key, then any other key" still quits.
+# Animation recording: tap anim_record twice to start, tap it once per
+# camera move to add a cut, anim_record_stop finishes (asks for the GIF
+# duration and writes a YAML animation file), esc cancels a recording.
+anim_record = "q"
 anim_record_stop = "Q"
 
 # Sidepanel controls
 sidepanel_move_up = "up"
 sidepanel_move_down = "down"
-sidepanel_expand = "enter"
-sidepanel_collapse = "escape"
