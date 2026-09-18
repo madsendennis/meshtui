@@ -110,15 +110,17 @@ meshtui <subcommand> --help   # authoritative flags per subcommand
 ```
 
 For coding agents, install the skill (a short pointer to `--capabilities`,
-so it never goes stale) into your agent's skills directory:
+so it never goes stale) with the tool itself:
 
 ```bash
-meshtui skill > ~/.agents/skills/meshtui/SKILL.md
-# install.sh offers to do this for you on interactive installs
+meshtui skill install          # into ~/.agents/skills/meshtui + detected agents
+meshtui skill install --dry-run
+meshtui skill print            # or pipe SKILL.md anywhere yourself
+meshtui skill uninstall
 ```
 
-See [SKILL.md](SKILL.md) for the full reference. Formats: `.ply .stl .obj
-.drc .glb`; a directory loads every supported mesh inside.
+See [SKILL.md](SKILL.md) for the reference. Formats: `.ply .stl .obj .drc
+.glb`; a directory loads every supported mesh inside.
 
 ```bash
 # Machine-readable stats

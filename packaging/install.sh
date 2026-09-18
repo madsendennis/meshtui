@@ -25,23 +25,7 @@ case ":$PATH:" in
 esac
 echo "meshtui installed to $PREFIX/bin/meshtui"
 
-# Offer to install the agent skill (SKILL.md) so coding agents discover the
-# tool. The skill just points the agent at `meshtui --capabilities`, so it
-# never goes stale. Skip in non-interactive (piped/scripted) installs.
-if [ -t 0 ]; then
-    SKILLS_DIR=""
-    for d in "$HOME/.agents/skills" "$HOME/.config/agents/skills"; do
-        if [ -d "$d" ]; then SKILLS_DIR="$d"; break; fi
-    done
-    : "${SKILLS_DIR:=$HOME/.agents/skills}"
-    printf 'Install the agent skill to %s/meshtui/SKILL.md? [y/N] ' "$SKILLS_DIR"
-    read -r ans || ans=""
-    case "$ans" in
-        y | Y | yes)
-            mkdir -p "$SKILLS_DIR/meshtui"
-            "$PREFIX/bin/meshtui" skill >"$SKILLS_DIR/meshtui/SKILL.md"
-            echo "skill installed to $SKILLS_DIR/meshtui/SKILL.md"
-            ;;
-        *) echo "skipped (run 'meshtui skill > <skills-dir>/meshtui/SKILL.md' anytime)" ;;
-    esac
-fi
+# Agent skill (optional, opt-in): SKILL.md just points agents at
+# 'meshtui --capabilities', so it never goes stale. Install it for detected
+# coding agents with:
+echo "agents: run 'meshtui skill install' to make coding agents discover meshtui"
