@@ -67,7 +67,9 @@ impl Default for CameraConfig {
         Self {
             kind: CameraKindConfig::Orthographic,
             fov_degrees: 60.0,
-            distance_padding: 1.0,
+            // 10% margin so the default framing never clips the mesh edge
+            // (exact bbox fits touched the viewport border at some aspects).
+            distance_padding: 1.1,
             initial_theta: 0.0,
             initial_phi: std::f32::consts::FRAC_PI_2,
         }

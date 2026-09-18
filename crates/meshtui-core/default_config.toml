@@ -5,7 +5,7 @@
 # Camera settings
 type = "orthographic"                  # Camera type: "perspective" or "orthographic"
 fov_degrees = 60.0                     # Field of view in degrees (vertical) for perspective
-distance_padding = 1.0                 # Multiplier for auto-calculated distance (larger = farther)
+distance_padding = 1.1                 # Multiplier for auto-calculated distance (larger = farther)
 initial_theta = 0.0                    # Initial horizontal angle in radians
 initial_phi = 1.57                     # Initial vertical angle in radians (pi/2 = 90 degrees)
 smoothing_factor = 0.8                 # Camera smoothing factor (0.1-1.0, higher is faster)
