@@ -33,6 +33,8 @@
 //!     camera: { azimuth: 90 }               # +90° from previous
 //!   - frames: 12, tween: true, ease: inout
 //!     camera: { azimuth_to: 270 }           # glide to an absolute pose
+//!   # Exact poses (what TUI recording writes): orientation [x,y,z,w] and
+//!   # target [x,y,z] override view/azimuth/elevation and tween via slerp/lerp.
 //!   - frames: 4
 //!     meshes: [{ name: gear, alpha: 0.3 }]  # fade (absolute)
 //! ```
@@ -96,6 +98,11 @@ pub struct CameraCut {
     pub distance: Option<f32>,
     pub kind: Option<String>,
     pub fov: Option<f32>,
+    /// Absolute: exact orientation quaternion [x, y, z, w] (e.g. written by
+    /// a TUI recording). Overrides view/azimuth/elevation; tweens via slerp.
+    pub orientation: Option<[f32; 4]>,
+    /// Absolute: exact look-at target. Tweens linearly.
+    pub target: Option<[f32; 3]>,
 }
 
 /// Top-level keys an animation file accepts (the SceneFile keys plus the
@@ -293,6 +300,13 @@ fn apply_cut(app: &mut App, cut: &Cut, state: &mut AnimState) -> Result<(), Stri
                 cam.elevation.unwrap_or(0.0).to_radians(),
             );
         }
+        // Exact pose (e.g. from a TUI recording) overrides everything above.
+        if let Some(q) = cam.orientation {
+            app.camera.orientation = glam::Quat::from_array(q).normalize();
+        }
+        if let Some(t) = cam.target {
+            app.camera.target = glam::Vec3::from(t);
+        }
         if let Some(zoom) = cam.zoom {
             app.camera.zoom(zoom);
         }
@@ -389,6 +403,7 @@ fn reload_mesh(
 /// wireframe ride along so their tweens also start from the pre-cut values.
 struct Snapshot {
     orientation: glam::Quat,
+    target: glam::Vec3,
     distance: f32,
     ortho_scale: f32,
     mesh_colors: Vec<meshtui_core::Color>,
@@ -400,6 +415,7 @@ impl Snapshot {
     fn of(app: &App) -> Self {
         Self {
             orientation: app.camera.orientation,
+            target: app.camera.target,
             distance: app.camera.distance,
             ortho_scale: app.camera.ortho_scale,
             mesh_colors: app.scene.meshes.iter().map(|m| m.color).collect(),
@@ -440,6 +456,7 @@ fn apply_cut_tweened(
 ) -> Result<(), String> {
     if let Some(cam) = &cut.camera {
         app.camera.orientation = before.orientation;
+        app.camera.target = before.target;
         app.camera.distance = before.distance;
         app.camera.ortho_scale = before.ortho_scale;
         if let Some(kind) = cam.kind.as_deref() {
@@ -457,7 +474,11 @@ fn apply_cut_tweened(
             app.base_up = up.normalize_or(glam::Vec3::Y);
         }
         let world_up = cut_world_up(app, cam);
-        if cam.azimuth_to.is_some() || cam.elevation_to.is_some() {
+        if let Some(q) = cam.orientation {
+            // Exact pose (e.g. a TUI recording): slerp toward it.
+            let target = glam::Quat::from_array(q).normalize();
+            app.camera.orientation = before.orientation.slerp(target, t);
+        } else if cam.azimuth_to.is_some() || cam.elevation_to.is_some() {
             // Absolute target pose, computed once from the base pose; the
             // tween slerps from the PRE-CUT orientation toward that target.
             let mut target = app.camera.clone();
@@ -483,6 +504,10 @@ fn apply_cut_tweened(
                     cam.elevation.unwrap_or(0.0).to_radians() * t,
                 );
             }
+        }
+        if let Some(target) = cam.target {
+            let target = glam::Vec3::from(target);
+            app.camera.target = before.target + (target - before.target) * t;
         }
         if let Some(zoom) = cam.zoom {
             app.camera.zoom(1.0 + (zoom - 1.0) * t);
@@ -926,6 +951,50 @@ cuts:
             (before.y - after.y).abs() < 1e-4,
             "azimuth around world-up keeps height: {before:?} -> {after:?}"
         );
+    }
+
+    #[test]
+    fn cut_applies_exact_orientation_and_target() {
+        let mut app = test_app();
+        let mut state = AnimState::of(&app.scene);
+        let q = glam::Quat::from_rotation_y(1.234);
+        let cut = Cut {
+            camera: Some(CameraCut {
+                orientation: Some(q.to_array()),
+                target: Some([1.0, 2.0, 3.0]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        apply_cut(&mut app, &cut, &mut state).unwrap();
+        assert!(app.camera.orientation.dot(q).abs() > 0.999_999);
+        assert_eq!(app.camera.target, glam::Vec3::new(1.0, 2.0, 3.0));
+    }
+
+    #[test]
+    fn tweened_exact_pose_slerps_to_the_target() {
+        let mut app = test_app();
+        let mut state = AnimState::of(&app.scene);
+        let before = Snapshot::of(&app);
+        let q0 = before.orientation;
+        let q1 = glam::Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let cut = Cut {
+            tween: Some(true),
+            camera: Some(CameraCut {
+                orientation: Some(q1.to_array()),
+                target: Some([2.0, 0.0, 0.0]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        apply_cut_tweened(&mut app, &before, &cut, 0.5, &mut state, true).unwrap();
+        let half = q0.slerp(q1, 0.5);
+        assert!(app.camera.orientation.dot(half).abs() > 0.999_9);
+        let mid_target = before.target + (glam::Vec3::new(2.0, 0.0, 0.0) - before.target) * 0.5;
+        assert!((app.camera.target - mid_target).length() < 1e-5);
+        apply_cut_tweened(&mut app, &before, &cut, 1.0, &mut state, false).unwrap();
+        assert!(app.camera.orientation.dot(q1).abs() > 0.999_999);
+        assert_eq!(app.camera.target, glam::Vec3::new(2.0, 0.0, 0.0));
     }
 
     #[test]

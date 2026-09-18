@@ -349,6 +349,10 @@ pub(crate) fn apply_scene_camera_pose(app: &mut app::App, file: &meshtui_core::S
             },
         );
     }
+    // An exact pose (e.g. a TUI recording) overrides the composed view/az/el.
+    if let Some(q) = cam.orientation {
+        app.camera.orientation = glam::Quat::from_array(q).normalize();
+    }
     // The fully posed camera is the reference for absolute
     // azimuth_to/elevation_to animation cuts.
     app.base_orientation = app.camera.orientation;
@@ -360,7 +364,9 @@ pub(crate) fn apply_scene_camera_pose(app: &mut app::App, file: &meshtui_core::S
 /// when the fit hasn't happened yet (TUI scene open).
 pub(crate) fn apply_scene_camera_post(app: &mut app::App, file: &meshtui_core::SceneFile) {
     let cam = &file.camera;
-    app.apply_post_fit_camera(cam.zoom, cam.distance);
+    // Target rides along: the one-time fit recenters it, so it must be
+    // (re-)applied after the fit.
+    app.apply_post_fit_camera(cam.zoom, cam.distance, cam.target.map(glam::Vec3::from));
     if let Some(light) = file.light {
         app.set_light_scale(light);
     }
@@ -396,14 +402,14 @@ fn print_capabilities() {
             "render": {
                 "about": "render a YAML scene file to one PNG",
                 "scene_file": "meshes (path/name/color/alpha/visible/scale/translate), camera, light, wireframe, output (size/background/transparent)",
-                "camera_keys": ["kind", "view", "azimuth", "elevation", "up", "fov", "zoom", "distance"],
+                "camera_keys": ["kind", "view", "azimuth", "elevation", "up", "fov", "zoom", "distance", "orientation [x,y,z,w]", "target [x,y,z]"],
                 "camera_note": "camera.distance/zoom are kept across renders; the camera auto-fits once at start and does NOT reframe per frame, so framing is stable across an animation",
             },
             "animate": {
                 "about": "render a base scene + scene cuts to a looping GIF",
                 "cuts": "top level is the scene-file format plus fps/frames/cuts; each cut holds N frames and changes only what it names; state persists across cuts",
                 "cut_keys": ["frames", "tween", "ease", "camera", "meshes", "light", "wireframe"],
-                "cut_camera_keys": ["view", "azimuth", "elevation", "azimuth_to", "elevation_to", "up", "zoom", "distance", "kind", "fov"],
+                "cut_camera_keys": ["view", "azimuth", "elevation", "azimuth_to", "elevation_to", "up", "zoom", "distance", "kind", "fov", "orientation [x,y,z,w]", "target [x,y,z]"],
                 "cut_semantics": {
                     "camera": "RELATIVE deltas that accumulate across cuts: azimuth/elevation add to the pose, zoom multiplies (two cuts of zoom:2 = 4x). azimuth_to/elevation_to are ABSOLUTE poses measured from the base view, ignoring earlier cuts.",
                     "meshes": "ABSOLUTE replacement: color/alpha/visible/scale/translate set the value (not a delta); a mesh entry with `path` reloads that mesh's geometry",
@@ -416,6 +422,7 @@ fn print_capabilities() {
             },
         },
         "scene_file_open": "passing a .yaml/.yml as the mesh argument opens that scene in the TUI",
+        "tui_recording": "in the TUI: tap the quit key twice to start recording, tap it once per camera move to add a cut, press Q to finish (asks for the GIF duration) and write an animation YAML for `meshtui animate`",
     });
     println!("{}", serde_json::to_string_pretty(&spec).unwrap());
 }

@@ -16,6 +16,8 @@
 //!   fov: 60
 //!   zoom: 0.9
 //!   distance: 5.0
+//!   orientation: [0, 0, 0, 1]  # exact pose quaternion [x,y,z,w]; overrides view/az/el
+//!   target: [0, 0, 0]          # exact look-at point (wins over the auto-fit)
 //! light: 1.0
 //! wireframe: 0.0
 //! meshes:
@@ -116,6 +118,12 @@ pub struct CameraSpec {
     pub fov: Option<f32>,
     pub zoom: Option<f32>,
     pub distance: Option<f32>,
+    /// Absolute camera orientation as a quaternion [x, y, z, w] — an exact
+    /// pose (e.g. written by a TUI recording). Overrides view/az/el.
+    pub orientation: Option<[f32; 4]>,
+    /// Absolute look-at target. Applied after the one-time auto-fit (the fit
+    /// recenters the target, so it must win over it).
+    pub target: Option<[f32; 3]>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -313,6 +321,16 @@ mod tests {
         assert!(parse_str("size: [99999, 600]\nmeshes: [{path: a.ply}]\n").is_err());
         assert!(parse_str("size: \"800x600\"\nmeshes: [{path: a.ply}]\n").is_ok());
         assert!(parse_str("size: \"65536x1\"\nmeshes: [{path: a.ply}]\n").is_err());
+    }
+
+    #[test]
+    fn camera_parses_exact_pose() {
+        let f = parse_str(
+            "meshes: [{path: a.ply}]\ncamera:\n  orientation: [0, 0, 0, 1]\n  target: [1, 2, 3]\n",
+        )
+        .unwrap();
+        assert_eq!(f.camera.orientation, Some([0.0, 0.0, 0.0, 1.0]));
+        assert_eq!(f.camera.target, Some([1.0, 2.0, 3.0]));
     }
 
     #[test]

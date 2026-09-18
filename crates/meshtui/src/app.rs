@@ -55,6 +55,11 @@ enum Modal {
         input: String,
         error: Option<String>,
     },
+    /// Finish an animation recording: how many seconds the GIF should run.
+    GifDuration {
+        input: String,
+        error: Option<String>,
+    },
 }
 
 /// Meshes removed by `mesh_delete`, restorable LIFO via `mesh_undo_delete`.
@@ -72,6 +77,35 @@ struct AnimationState {
     render_interval: Duration,
     next_render: Instant,
     pending_render: bool,
+}
+
+/// One recorded camera pose (the base pose plus one per `q` press).
+struct RecordedPose {
+    orientation: glam::Quat,
+    target: Vec3,
+    /// Ortho scale folded into the distance so the written YAML replays the
+    /// exact framing with the default ortho scale of 1.
+    distance: f32,
+    kind: CameraKind,
+    fov: f32,
+}
+
+impl RecordedPose {
+    fn of(camera: &Camera) -> Self {
+        Self {
+            orientation: camera.orientation,
+            target: camera.target,
+            distance: camera.distance * camera.ortho_scale,
+            kind: camera.kind,
+            fov: camera.fov_degrees,
+        }
+    }
+}
+
+/// In-progress animation recording: `poses[0]` becomes the scene's base
+/// camera, each later pose one tweened cut.
+struct Recording {
+    poses: Vec<RecordedPose>,
 }
 
 pub struct App {
@@ -102,14 +136,22 @@ pub struct App {
     /// The persistent world up axis orbits turn around (from config or the
     /// scene's camera.up). Not the camera's mutable, possibly tilted up.
     pub base_up: Vec3,
-    /// Scene zoom/distance waiting for the one-time auto-fit (TUI scene
-    /// open applies the camera before the terminal aspect is known).
+    /// Scene zoom/distance/target waiting for the one-time auto-fit (TUI
+    /// scene open applies the camera before the terminal aspect is known).
     pending_zoom: Option<f32>,
     pending_distance: Option<f32>,
+    pending_target: Option<Vec3>,
     /// When on (default), hiding/showing/deleting/adding meshes reframes the
     /// camera to the visible bounds. Toggle off (`,`) to keep the camera
     /// distance constant — e.g. while stepping meshes for an animation.
     auto_zoom: bool,
+    /// Animation recording in progress: double-tap the quit key starts it,
+    /// each further quit-key press adds a camera cut, and the record-stop
+    /// key (`Q`) asks for the GIF duration and writes the animation file.
+    recording: Option<Recording>,
+    /// Set by the first quit-key press; the NEXT key resolves it: the quit
+    /// key again starts a recording, escape cancels, anything else quits.
+    pending_quit: bool,
     dirty: bool,
     render_dirty: bool,
 }
@@ -220,6 +262,9 @@ impl App {
             base_up,
             pending_zoom: None,
             pending_distance: None,
+            pending_target: None,
+            recording: None,
+            pending_quit: false,
             auto_zoom: true,
             dirty: true,
             render_dirty: true,
@@ -248,22 +293,30 @@ impl App {
                 aspect,
             );
         }
-        // The fit resets distance/ortho_scale, so deferred scene zoom and
-        // distance must be re-applied on top of it.
+        // The fit resets target/distance/ortho_scale, so deferred scene
+        // camera values must be re-applied on top of it.
         if let Some(zoom) = self.pending_zoom.take() {
             self.camera.zoom(zoom);
         }
         if let Some(distance) = self.pending_distance.take() {
             self.camera.distance = distance.max(1e-3);
         }
+        if let Some(target) = self.pending_target.take() {
+            self.camera.target = target;
+        }
         self.render_dirty = true;
     }
 
-    /// Apply scene zoom/distance AFTER the one-time auto-fit (the fit would
-    /// cancel them). Applies immediately when the fit already happened;
+    /// Apply scene zoom/distance/target AFTER the one-time auto-fit (the fit
+    /// would cancel them). Applies immediately when the fit already happened;
     /// otherwise deferred until `set_aspect` runs (TUI scene open, where the
     /// terminal aspect is unknown until the first frame).
-    pub fn apply_post_fit_camera(&mut self, zoom: Option<f32>, distance: Option<f32>) {
+    pub fn apply_post_fit_camera(
+        &mut self,
+        zoom: Option<f32>,
+        distance: Option<f32>,
+        target: Option<Vec3>,
+    ) {
         if self.aspect >= 0.0 {
             if let Some(zoom) = zoom {
                 self.camera.zoom(zoom);
@@ -271,9 +324,13 @@ impl App {
             if let Some(distance) = distance {
                 self.camera.distance = distance.max(1e-3);
             }
+            if let Some(target) = target {
+                self.camera.target = target;
+            }
         } else {
             self.pending_zoom = zoom;
             self.pending_distance = distance;
+            self.pending_target = target;
         }
     }
 
@@ -353,6 +410,49 @@ impl App {
         }
         if self.modal.is_some() {
             return self.handle_modal_key(key);
+        }
+        // Animation recording intercepts the quit key: double-tap starts a
+        // recording, further taps add cuts. Plain "quit key, then anything"
+        // still quits, so the habit keeps working.
+        let quit_key = self.config.key("quit").unwrap_or_else(|| "q".into());
+        let stop_key = self
+            .config
+            .key("anim_record_stop")
+            .unwrap_or_else(|| "Q".into());
+        if self.pending_quit {
+            self.pending_quit = false;
+            self.status_message = None;
+            if key == quit_key {
+                self.start_recording();
+                self.dirty = true;
+                return false;
+            }
+            if key == "escape" {
+                self.dirty = true;
+                return false;
+            }
+            return true;
+        }
+        if key == quit_key {
+            if self.recording.is_some() {
+                self.record_cut();
+            } else {
+                self.pending_quit = true;
+                self.status_message = Some(format!(
+                    "press {} again to start recording · esc cancels · any other key quits",
+                    key_label(&quit_key),
+                ));
+            }
+            self.dirty = true;
+            return false;
+        }
+        if self.recording.is_some() && key == stop_key {
+            self.modal = Some(Modal::GifDuration {
+                input: String::new(),
+                error: None,
+            });
+            self.dirty = true;
+            return false;
         }
         if key == "?" {
             self.modal = Some(Modal::CommandPalette {
@@ -681,6 +781,49 @@ impl App {
                     }
                 }
             }
+            Modal::GifDuration { input, error } => match key {
+                // Escape keeps the recording running; Q reopens the dialog.
+                "escape" => {
+                    keep_open = false;
+                    if self.recording.is_some() {
+                        self.status_message = Some("recording continues".into());
+                    }
+                }
+                "enter" => {
+                    let seconds = if input.trim().is_empty() {
+                        Some(5.0)
+                    } else {
+                        input.trim().parse::<f32>().ok()
+                    };
+                    match seconds {
+                        Some(s) if (0.1..=600.0).contains(&s) => {
+                            let ts = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
+                            let path = std::path::PathBuf::from(format!("meshtui_anim_{ts}.yaml"));
+                            self.status_message = Some(match self.finish_recording(s, &path) {
+                                Ok(msg) => msg,
+                                Err(e) => format!("recording failed: {e}"),
+                            });
+                            keep_open = false;
+                        }
+                        _ => *error = Some("Enter a duration in seconds (0.1-600)".into()),
+                    }
+                }
+                "backspace" => {
+                    input.pop();
+                    *error = None;
+                }
+                _ => {
+                    if let Some(ch) = input_char(key) {
+                        if ch.is_ascii_digit() || ch == '.' {
+                            input.push(ch);
+                            *error = None;
+                        }
+                    }
+                }
+            },
             Modal::MeshFilter { input, error } => match key {
                 "escape" => keep_open = false,
                 "enter" => match self.set_mesh_filter(input) {
@@ -832,6 +975,47 @@ impl App {
     /// Current wireframe overlay thickness in pixels.
     pub fn wireframe_thickness(&self) -> f32 {
         self.wireframe_thickness
+    }
+
+    /// Start an animation recording: the current camera pose becomes the
+    /// scene's base camera, each later quit-key press adds one cut.
+    fn start_recording(&mut self) {
+        self.recording = Some(Recording {
+            poses: vec![RecordedPose::of(&self.camera)],
+        });
+        let quit_key = self.config.key("quit").unwrap_or_else(|| "q".into());
+        let stop_key = self
+            .config
+            .key("anim_record_stop")
+            .unwrap_or_else(|| "Q".into());
+        self.status_message = Some(format!(
+            "recording animation — {} adds a cut per camera move, {} finishes",
+            key_label(&quit_key),
+            key_label(&stop_key),
+        ));
+    }
+
+    /// Append the current camera pose as one cut to the recording.
+    fn record_cut(&mut self) {
+        if let Some(rec) = &mut self.recording {
+            rec.poses.push(RecordedPose::of(&self.camera));
+            self.status_message = Some(format!("recorded cut {}", rec.poses.len() - 1));
+        }
+    }
+
+    /// Write the recording as an animation YAML: base scene (meshes with
+    /// current colors/visibility, camera = first pose) plus one tweened cut
+    /// per recorded pose. Returns the status message.
+    fn finish_recording(&mut self, seconds: f32, path: &std::path::Path) -> Result<String, String> {
+        let rec = self.recording.take().ok_or("not recording")?;
+        let yaml = recording_yaml(self, &rec, seconds)?;
+        std::fs::write(path, &yaml).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        let cuts = rec.poses.len().saturating_sub(1).max(1);
+        Ok(format!(
+            "wrote {} ({cuts} cuts, ~{seconds:.1}s) — replay: meshtui animate {}",
+            path.display(),
+            path.display(),
+        ))
     }
 
     /// Recenter and refit zoom to currently visible meshes, keeping orbit.
@@ -1168,8 +1352,12 @@ impl App {
                 format!(" | filter:{:?}", self.mesh_filter)
             };
             let fit = if self.auto_zoom { "" } else { " | fit:manual" };
+            let recording = match &self.recording {
+                Some(rec) => format!(" | REC {} cuts", rec.poses.len() - 1),
+                None => String::new(),
+            };
             format!(
-                " {kind} | wf:{:.1} | light:{:.1}x | marked:{}{filter}{animation}{fit} | ? commands | q quit",
+                " {kind} | wf:{:.1} | light:{:.1}x | marked:{}{filter}{animation}{fit}{recording} | ? commands | q quit",
                 self.wireframe_thickness, self.light_scale, self.marked.len(),
             )
         });
@@ -1358,6 +1546,14 @@ impl App {
             Modal::AnimationDirection { interval_ms } => {
                 draw_animation_direction(f, self, *interval_ms)
             }
+            Modal::GifDuration { input, error } => draw_input_modal(
+                f,
+                self.theme,
+                " Finish Recording ",
+                "GIF duration in seconds (empty = 5)",
+                input,
+                error.as_deref(),
+            ),
             Modal::MeshFilter { input, error } => draw_input_modal(
                 f,
                 self.theme,
@@ -1913,6 +2109,137 @@ fn pixel_size(app: &App, total_cols: u32, total_rows: u32, vw: u32, vh: u32) -> 
     )
 }
 
+/// Build the animation YAML for a finished recording: the base scene
+/// (meshes with their current color/alpha/visibility, camera = first
+/// recorded pose) plus one tweened cut per later pose.
+fn recording_yaml(app: &App, rec: &Recording, seconds: f32) -> Result<String, String> {
+    let mut out = String::from(
+        "# Recorded in the meshtui TUI: one tweened cut per camera move.\n\
+         # Replay: meshtui animate <this file> -o out.gif\n",
+    );
+    // Size follows the current viewport aspect at a sane default width.
+    let aspect = if app.aspect > 0.0 {
+        app.aspect
+    } else {
+        4.0 / 3.0
+    };
+    let w = 1600u32;
+    let h = ((w as f32 / aspect).round() as u32).clamp(1, 4096);
+    out.push_str(&format!("size: [{w}, {h}]\ntransparent: true\n"));
+
+    // Even hold per cut so the total runtime approximates `seconds`.
+    let ncuts = rec.poses.len().saturating_sub(1).max(1);
+    const FPS: u32 = 30;
+    let hold = ((FPS as f32 * seconds) / ncuts as f32).round().max(1.0) as u32;
+    out.push_str(&format!("fps: {FPS}\nframes: {hold}\n"));
+
+    out.push_str("meshes:\n");
+    for mesh in &app.scene.meshes {
+        let source = mesh.source.as_deref().ok_or_else(|| {
+            format!(
+                "mesh {:?} has no source file; cannot record the scene",
+                mesh.name
+            )
+        })?;
+        out.push_str(&format!(
+            "  - {{ path: {}, name: {}, color: \"{}\"",
+            yaml_str(&source.display().to_string()),
+            yaml_str(&mesh.name),
+            color_hex(mesh.color),
+        ));
+        if !mesh.visible {
+            out.push_str(", visible: false");
+        }
+        out.push_str(" }\n");
+    }
+
+    let base = &rec.poses[0];
+    out.push_str("camera:\n");
+    out.push_str(&format!("  kind: {}\n", kind_name(base.kind)));
+    out.push_str(&format!("  fov: {}\n", fmt_f32(base.fov)));
+    out.push_str(&format!("  orientation: {}\n", quat_yaml(base.orientation)));
+    out.push_str(&format!("  target: {}\n", vec3_yaml(base.target)));
+    out.push_str(&format!("  distance: {}\n", fmt_f32(base.distance)));
+
+    out.push_str("cuts:\n");
+    if rec.poses.len() == 1 {
+        // No camera moves recorded: hold the base pose for the duration.
+        out.push_str("  - {}\n");
+    }
+    for (i, pose) in rec.poses.iter().enumerate().skip(1) {
+        let prev = &rec.poses[i - 1];
+        out.push_str("  - tween: true\n    ease: inout\n    camera:\n");
+        out.push_str(&format!(
+            "      orientation: {}\n",
+            quat_yaml(pose.orientation)
+        ));
+        out.push_str(&format!("      target: {}\n", vec3_yaml(pose.target)));
+        out.push_str(&format!("      distance: {}\n", fmt_f32(pose.distance)));
+        // Projection only changes on deliberate key presses; record the
+        // change so the replay follows it.
+        if pose.kind != prev.kind {
+            out.push_str(&format!("      kind: {}\n", kind_name(pose.kind)));
+        }
+        if (pose.fov - prev.fov).abs() > 1e-3 {
+            out.push_str(&format!("      fov: {}\n", fmt_f32(pose.fov)));
+        }
+    }
+    Ok(out)
+}
+
+/// Single-quoted YAML string (only ' needs escaping).
+fn yaml_str(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+/// sRGB float color back to #RRGGBB (or #RRGGBBAA when translucent).
+fn color_hex(c: meshtui_core::Color) -> String {
+    let ch = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    if c[3] >= 1.0 {
+        format!("#{:02x}{:02x}{:02x}", ch(c[0]), ch(c[1]), ch(c[2]))
+    } else {
+        format!(
+            "#{:02x}{:02x}{:02x}{:02x}",
+            ch(c[0]),
+            ch(c[1]),
+            ch(c[2]),
+            ch(c[3])
+        )
+    }
+}
+
+fn kind_name(kind: CameraKind) -> &'static str {
+    match kind {
+        CameraKind::Perspective => "perspective",
+        CameraKind::Orthographic => "orthographic",
+    }
+}
+
+/// Compact float formatting for human-editable YAML.
+fn fmt_f32(v: f32) -> String {
+    let s = format!("{v:.6}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    match s {
+        "" | "-" | "-0" => "0".into(),
+        s => s.to_string(),
+    }
+}
+
+fn quat_yaml(q: glam::Quat) -> String {
+    let [x, y, z, w] = q.to_array();
+    format!(
+        "[{}, {}, {}, {}]",
+        fmt_f32(x),
+        fmt_f32(y),
+        fmt_f32(z),
+        fmt_f32(w)
+    )
+}
+
+fn vec3_yaml(v: Vec3) -> String {
+    format!("[{}, {}, {}]", fmt_f32(v.x), fmt_f32(v.y), fmt_f32(v.z))
+}
+
 /// Save a freshly rendered frame as PNG (never a stale cached frame).
 pub fn save_screenshot(
     app: &mut App,
@@ -2349,6 +2676,91 @@ mod tests {
     }
 
     #[test]
+    fn quit_key_double_tap_records_otherwise_quits() {
+        // q then any other key quits (the plain-quit habit keeps working).
+        let mut app = app_with_meshes(&["mesh"]);
+        assert!(!app.handle_key("q"), "first q only arms the pending state");
+        assert!(app.pending_quit);
+        assert!(app.handle_key("j"), "q then another key quits");
+
+        // q then escape cancels; q q starts a recording.
+        let mut app = app_with_meshes(&["mesh"]);
+        assert!(!app.handle_key("q"));
+        assert!(!app.handle_key("escape"));
+        assert!(!app.pending_quit);
+        assert!(app.recording.is_none());
+        assert!(!app.handle_key("q"));
+        assert!(!app.handle_key("q"));
+        assert!(app.recording.is_some(), "double-q starts recording");
+        assert!(
+            app.status_message
+                .as_deref()
+                .unwrap_or("")
+                .contains("recording"),
+            "recording announces itself"
+        );
+    }
+
+    #[test]
+    fn recording_writes_replayable_animation_yaml() {
+        let dir = std::env::temp_dir().join(format!("meshtui_rec_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stl = dir.join("tri.stl");
+        std::fs::write(
+            &stl,
+            "solid s\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\n\
+             vertex 0 1 0\nendloop\nendfacet\nendsolid s\n",
+        )
+        .unwrap();
+
+        let mut app = app_with_meshes(&["mesh"]);
+        app.scene.meshes[0].source = Some(stl);
+        app.scene.meshes[0].color = [1.0, 0.0, 0.0, 0.5];
+
+        // q q starts, one q per camera move adds a cut, Q opens the dialog.
+        app.handle_key("q");
+        app.handle_key("q");
+        let pose0 = app.camera.orientation;
+        app.camera.orbit(0.3, -0.2);
+        app.handle_key("q");
+        app.camera.orbit(-0.1, 0.4);
+        app.handle_key("q");
+        app.handle_key("Q");
+        assert!(matches!(app.modal, Some(Modal::GifDuration { .. })));
+
+        let out = dir.join("rec.yaml");
+        let msg = app.finish_recording(4.0, &out).unwrap();
+        assert!(msg.contains("2 cuts"), "{msg}");
+        assert!(app.recording.is_none());
+
+        // The file parses, carries the poses, and reloads the meshes.
+        let text = std::fs::read_to_string(&out).unwrap();
+        let anim = crate::animate::parse_str(&text).unwrap();
+        assert_eq!(anim.cuts.len(), 2);
+        assert_eq!(anim.cuts[0].tween, Some(true));
+        let cam = &anim.scene.camera;
+        let base = cam
+            .orientation
+            .map(glam::Quat::from_array)
+            .expect("base camera orientation");
+        assert!(
+            base.dot(pose0).abs() > 0.999_999,
+            "base camera is the pose at recording start"
+        );
+        assert!(anim.cuts[1].camera.as_ref().unwrap().orientation.is_some());
+        assert_eq!(anim.fps, Some(30));
+        assert_eq!(anim.frames, Some(60), "4s * 30fps / 2 cuts = 60 hold");
+        let scene = anim.scene.build_scene().unwrap();
+        assert_eq!(scene.meshes.len(), 1);
+        assert!(
+            (scene.meshes[0].color[3] - 0.5).abs() < 1.0 / 255.0,
+            "color+alpha round-trip, got {:?}",
+            scene.meshes[0].color
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn hiding_every_mesh_leaves_the_camera_unchanged() {
         let mut app = app_with_meshes(&["mesh"]);
         let target = app.camera.target;
@@ -2508,6 +2920,10 @@ mod tests {
                 error: None,
             },
             Modal::AnimationDirection { interval_ms: 100 },
+            Modal::GifDuration {
+                input: String::new(),
+                error: None,
+            },
             Modal::MeshFilter {
                 input: String::new(),
                 error: None,

@@ -181,6 +181,11 @@ mesh_undo_delete = "ctrl+z"            # Restore the most recently deleted meshe
 # Animation controls
 animation_start = "a"
 animation_stop = "A"
+# Animation recording builds on the quit key: tap it twice to start
+# recording, tap it once per camera move to add a cut, then press
+# anim_record_stop to finish (asks for the GIF duration and writes a YAML
+# animation file). Plain "quit key, then any other key" still quits.
+anim_record_stop = "Q"
 
 # Sidepanel controls
 sidepanel_move_up = "up"

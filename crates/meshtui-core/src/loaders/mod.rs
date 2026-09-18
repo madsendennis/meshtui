@@ -118,6 +118,7 @@ pub fn load_meshes(path: &Path) -> Result<Vec<Mesh>, LoadError> {
         other => return Err(LoadError::UnsupportedFormat(other.to_string())),
     };
     for m in &mut meshes {
+        m.source = Some(path.to_path_buf());
         validate_mesh(path, m)?;
         if m.normals.is_empty()
             || m.normals

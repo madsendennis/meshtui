@@ -18,6 +18,9 @@ pub struct Mesh {
     /// Color authored in the file, if any (fixes "colors never used" bug).
     pub original_color: Option<Color>,
     pub visible: bool,
+    /// File the mesh was loaded from, when known. Scene/animation files
+    /// reference meshes by path, so recordings need it to reload geometry.
+    pub source: Option<std::path::PathBuf>,
 }
 
 impl Mesh {
@@ -30,6 +33,7 @@ impl Mesh {
             color: [1.0, 1.0, 1.0, 1.0],
             original_color: None,
             visible: true,
+            source: None,
         }
     }
 
