@@ -333,6 +333,26 @@ prepend_rules = [
 when you quit. The `*/` rule makes `Enter` on a folder open all meshes inside
 it; drop that line if you prefer folders to just `cd` into themselves.
 
+## Desktop file-manager integration
+
+To make MeshTUI the default application for mesh files in a graphical file
+manager (Nautilus, Dolphin, Thunar, …), so double-clicking a
+PLY/STL/OBJ/DRC/GLB file opens it in a Kitty-graphics-capable terminal, run
+[`integrations/freedesktop/install.sh`](integrations/freedesktop/install.sh):
+
+```bash
+./integrations/freedesktop/install.sh
+```
+
+The installer registers the mesh MIME types (with a high glob weight so ASCII
+meshes aren't misdetected as `text/plain`), installs a `meshtui.desktop`
+entry, and sets MeshTUI as the default handler. It launches MeshTUI via
+`xdg-terminal-exec` when available (your configured terminal preference),
+falling back to `kitty`; override with e.g. `TERMINAL_CMD=ghostty
+./integrations/freedesktop/install.sh`. Everything installs under
+`$XDG_DATA_HOME` (`~/.local/share` by default) — no root needed. Restart your
+file manager to pick up the change.
+
 ## Remote and headless servers
 
 The renderer is CPU-only, so a headless Ubuntu server needs no Vulkan, OpenGL,
