@@ -8,6 +8,11 @@ not require a GPU, desktop session, or display server.
 > implementation to Rust for better performance, a smaller self-contained
 > binary, and easier distribution (no Python runtime or dependencies needed).
 
+## Status
+
+Early but functional. Expect breaking changes — the CLI, config keys, and
+scene/animation file formats may change between releases.
+
 ## Features
 
 - Interactive orbit, zoom, axis presets, orthographic/perspective cameras, and animation
@@ -28,7 +33,7 @@ toolchain needed.
 ```bash
 # Pin the release version (see https://github.com/madsendennis/meshtui/releases
 # for the latest tag). musl = static build, works everywhere; gnu = glibc build.
-V=v0.1.1
+V=v0.2.0
 curl -LO https://github.com/madsendennis/meshtui/releases/download/$V/meshtui-$V-x86_64-unknown-linux-musl.tar.gz
 tar xzf meshtui-$V-x86_64-unknown-linux-musl.tar.gz
 cd meshtui-*/ && ./install.sh
@@ -356,6 +361,12 @@ cargo test --workspace
 cargo clippy --workspace --all-targets
 cargo fmt --all --check
 ```
+
+## Contributing
+
+If your interests align with the project, contributions are welcome! Feel
+free to open issues or pull requests on
+[GitHub](https://github.com/madsendennis/meshtui).
 
 ## License
 
