@@ -91,7 +91,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         section: "Camera",
         action: "toggle_auto_zoom",
-        description: "Toggle auto-zoom (reframe when meshes change)",
+        description: "Toggle auto-zoom (reframe when meshes or view axis change)",
     },
     CommandSpec {
         section: "Camera",

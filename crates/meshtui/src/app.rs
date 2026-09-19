@@ -678,20 +678,16 @@ impl App {
                 }
             }
             "reset_orbital" => self.reset_camera(),
-            "view_minus_x" => self.camera.set_view_axis(ViewAxis::NegX),
-            "view_plus_x" => self.camera.set_view_axis(ViewAxis::PosX),
-            "view_minus_y" => self.camera.set_view_axis(ViewAxis::NegY),
-            "view_plus_y" => self.camera.set_view_axis(ViewAxis::PosY),
-            "view_minus_z" => self.camera.set_view_axis(ViewAxis::NegZ),
-            "view_plus_z" => self.camera.set_view_axis(ViewAxis::PosZ),
+            "view_minus_x" => self.snap_view_axis(ViewAxis::NegX),
+            "view_plus_x" => self.snap_view_axis(ViewAxis::PosX),
+            "view_minus_y" => self.snap_view_axis(ViewAxis::NegY),
+            "view_plus_y" => self.snap_view_axis(ViewAxis::PosY),
+            "view_minus_z" => self.snap_view_axis(ViewAxis::NegZ),
+            "view_plus_z" => self.snap_view_axis(ViewAxis::PosZ),
             "camera_orthographic" => self.set_camera_kind(CameraKind::Orthographic),
             "camera_perspective" => self.set_camera_kind(CameraKind::Perspective),
-            "up_vector_next" => self
-                .camera
-                .cycle_up(&self.config.view.up_vectors.clone(), true),
-            "up_vector_prev" => self
-                .camera
-                .cycle_up(&self.config.view.up_vectors.clone(), false),
+            "up_vector_next" => self.cycle_up_vector(true),
+            "up_vector_prev" => self.cycle_up_vector(false),
             "wireframe_off" => self.wireframe_thickness = 0.0,
             "wireframe_increase" => {
                 self.wireframe_thickness = if self.wireframe_thickness <= 0.0 {
@@ -1228,7 +1224,8 @@ impl App {
 
     /// Recenter and refit zoom to currently visible meshes, keeping orbit.
     /// No-op when auto-zoom is toggled off, so the camera distance stays
-    /// constant while meshes are hidden/shown (steady animation frames).
+    /// constant while meshes are hidden/shown or the view snaps to a preset
+    /// axis (steady animation frames).
     fn frame_visible_meshes(&mut self) {
         if !self.auto_zoom {
             self.render_dirty = true; // visibility changed; framing must not
@@ -1265,6 +1262,23 @@ impl App {
         }
         self.camera.kind = kind;
         self.frame_visible_meshes_forced();
+    }
+
+    /// Snap to a preset view axis, then refit with auto-zoom on: the
+    /// projected extents change with the view direction, so the old distance
+    /// can clip an oblong mesh or leave it tiny. With auto-zoom off the
+    /// distance stays fixed (steady frames for animations).
+    fn snap_view_axis(&mut self, axis: ViewAxis) {
+        self.camera.set_view_axis(axis);
+        self.frame_visible_meshes();
+    }
+
+    /// Cycle the up vector, then refit with auto-zoom on — rolling the
+    /// camera changes the projected extents just like an axis snap does.
+    fn cycle_up_vector(&mut self, forward: bool) {
+        self.camera
+            .cycle_up(&self.config.view.up_vectors.clone(), forward);
+        self.frame_visible_meshes();
     }
 
     fn reset_all(&mut self) {
@@ -3086,6 +3100,102 @@ mod tests {
             combined_distance
         );
         assert_eq!(app.camera.orientation, orientation);
+    }
+
+    #[test]
+    fn axis_snap_refits_with_auto_zoom_on() {
+        let mut scene = Scene::new();
+        // Oblong mesh: long along X, thin in Y/Z.
+        let mut mesh = Mesh::new("plank");
+        mesh.positions = vec![
+            Vec3::ZERO,
+            Vec3::new(100.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        ];
+        mesh.indices = vec![0, 1, 2];
+        mesh.compute_normals();
+        scene.meshes.push(mesh);
+        let mut app = App::new(scene, Config::load(None).unwrap());
+        let wide_distance = app.camera.distance;
+
+        // Looking down the long axis shrinks the projected extents, so the
+        // fit distance must drop well below the wide-view fit (the ortho fit
+        // keeps at least the half-depth, so it can't collapse to the thin
+        // profile exactly).
+        app.execute_action("view_minus_x");
+        assert!(
+            app.camera.distance < wide_distance * 0.8,
+            "axis snap refits: distance={:.3} wide={:.3}",
+            app.camera.distance,
+            wide_distance
+        );
+
+        // Back to a wide view: the fit grows back to the wide framing.
+        app.execute_action("view_plus_z");
+        assert!(
+            (app.camera.distance - wide_distance).abs() < wide_distance * 0.05,
+            "snapping back refits to the wide view: distance={:.3} wide={:.3}",
+            app.camera.distance,
+            wide_distance
+        );
+    }
+
+    #[test]
+    fn axis_snap_keeps_distance_with_auto_zoom_off() {
+        let mut scene = Scene::new();
+        scene.meshes.push(triangle_at("near", Vec3::ZERO, 1.0));
+        let mut app = App::new(scene, Config::load(None).unwrap());
+        app.execute_action("toggle_auto_zoom");
+        let distance = app.camera.distance;
+        let target = app.camera.target;
+
+        app.execute_action("view_minus_x");
+        assert_eq!(app.camera.distance, distance, "no refit with auto-zoom off");
+        assert_eq!(app.camera.target, target, "no recenter with auto-zoom off");
+        assert!(
+            app.camera.offset_dir().dot(Vec3::X).abs() > 0.99,
+            "the axis snap itself still happens"
+        );
+    }
+
+    #[test]
+    fn reset_orbital_refits_after_manual_zoom() {
+        let mut app = app_with_meshes(&["alpha"]);
+        let fit_distance = app.camera.distance;
+        app.execute_action("zoom_in");
+        // The default camera is orthographic: zoom lives in ortho_scale.
+        assert_ne!(app.camera.ortho_scale, 1.0, "manual zoom applied");
+
+        app.execute_action("reset_orbital");
+        assert_eq!(
+            app.camera.distance, fit_distance,
+            "reset_orbital refits to the visible meshes"
+        );
+        assert_eq!(app.camera.ortho_scale, 1.0, "reset_orbital resets the zoom");
+    }
+
+    #[test]
+    fn up_vector_cycle_refits_with_auto_zoom_on() {
+        let mut scene = Scene::new();
+        let mut mesh = Mesh::new("plank");
+        mesh.positions = vec![
+            Vec3::ZERO,
+            Vec3::new(100.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        ];
+        mesh.indices = vec![0, 1, 2];
+        mesh.compute_normals();
+        scene.meshes.push(mesh);
+        let mut app = App::new(scene, Config::load(None).unwrap());
+        let distance = app.camera.distance;
+
+        // Rolling to Z-up rotates the long axis out of the view plane row,
+        // changing the projected extents and therefore the fit.
+        app.execute_action("up_vector_next");
+        assert_ne!(
+            app.camera.distance, distance,
+            "up-vector cycle refits with auto-zoom on"
+        );
     }
 
     #[test]

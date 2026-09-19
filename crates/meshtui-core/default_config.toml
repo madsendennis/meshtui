@@ -144,7 +144,7 @@ orbit_up_fast = "K"
 # Zoom controls
 zoom_in = "z"
 zoom_out = "Z"
-toggle_auto_zoom = ","                # Toggle auto-reframe when meshes are hidden/shown (off = fixed camera distance, steady for animations)
+toggle_auto_zoom = ","                # Toggle auto-reframe when meshes are hidden/shown or the view snaps to a preset axis (off = fixed camera distance, steady for animations)
 
 # Reset controls
 reset_single_mesh = "r"
