@@ -1611,11 +1611,6 @@ impl App {
                     } else {
                         " "
                     };
-                    let color = TColor::Rgb(
-                        (mesh.color[0].clamp(0.0, 1.0) * 255.0).round() as u8,
-                        (mesh.color[1].clamp(0.0, 1.0) * 255.0).round() as u8,
-                        (mesh.color[2].clamp(0.0, 1.0) * 255.0).round() as u8,
-                    );
                     // Style the selected row per-span instead of via
                     // List::highlight_style, which is patched over the whole
                     // row after rendering and would repaint the color dot
@@ -1633,6 +1628,23 @@ impl App {
                         theme.selection
                     } else {
                         theme.background
+                    };
+                    // Fade the dot toward the row background by the mesh
+                    // alpha so transparency shows in the sidebar. Hidden
+                    // meshes keep the full color so the hollow marker stays
+                    // readable regardless of alpha.
+                    let color = {
+                        let rgb = TColor::Rgb(
+                            (mesh.color[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+                            (mesh.color[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+                            (mesh.color[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+                        );
+                        let alpha = mesh.color[3].clamp(0.0, 1.0);
+                        if mesh.visible && alpha < 1.0 {
+                            blend_color(rgb, dot_bg, 1.0 - alpha)
+                        } else {
+                            rgb
+                        }
                     };
                     ListItem::new(Line::from(vec![
                         Span::styled(
@@ -1819,6 +1831,23 @@ fn filter_mesh_indices(scene: &Scene, filter: &str) -> Result<Vec<usize>, String
         a_name.cmp(b_name).then_with(|| a_index.cmp(b_index))
     });
     Ok(matches.into_iter().map(|(index, _)| index).collect())
+}
+
+/// Linear blend of `from` toward `to` by `amount` (0 = from, 1 = to).
+/// Non-RGB colors pass through unchanged.
+fn blend_color(from: TColor, to: TColor, amount: f32) -> TColor {
+    let amount = amount.clamp(0.0, 1.0);
+    match (from, to) {
+        (TColor::Rgb(fr, fg, fb), TColor::Rgb(tr, tg, tb)) => {
+            let channel = |f: u8, t: u8| {
+                (f as f32 + (t as f32 - f as f32) * amount)
+                    .round()
+                    .clamp(0.0, 255.0) as u8
+            };
+            TColor::Rgb(channel(fr, tr), channel(fg, tg), channel(fb, tb))
+        }
+        _ => from,
+    }
 }
 
 fn truncate(s: &str, n: usize) -> String {
@@ -2720,6 +2749,63 @@ mod tests {
             .find(|cell| cell.symbol() == "a")
             .expect("mesh name cell");
         assert_eq!(name_cell.fg, app.theme.selection_foreground);
+    }
+
+    #[test]
+    fn sidebar_dot_fades_with_mesh_alpha() {
+        let mut app = app_with_meshes(&["alpha"]);
+        app.scene.meshes[0].color = [1.0, 0.0, 0.0, 0.5];
+        let backend = TestBackend::new(100, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw_ui(frame)).unwrap();
+        let buf = terminal.backend().buffer();
+        let dot = buf
+            .content()
+            .iter()
+            .find(|cell| cell.symbol() == "●")
+            .expect("visible mesh dot");
+        // The first row is selected, so the dot fades toward the selection
+        // background rather than the panel background.
+        let expected = blend_color(TColor::Rgb(255, 0, 0), app.theme.selection, 0.5);
+        assert_eq!(
+            dot.fg, expected,
+            "half-transparent mesh fades the dot halfway to the row background"
+        );
+    }
+
+    #[test]
+    fn hidden_mesh_dot_keeps_full_color_regardless_of_alpha() {
+        let mut app = app_with_meshes(&["alpha"]);
+        app.scene.meshes[0].color = [1.0, 0.0, 0.0, 0.0];
+        app.scene.meshes[0].visible = false;
+        let backend = TestBackend::new(100, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw_ui(frame)).unwrap();
+        let buf = terminal.backend().buffer();
+        let dot = buf
+            .content()
+            .iter()
+            .find(|cell| cell.symbol() == "○")
+            .expect("hidden mesh dot");
+        assert_eq!(
+            dot.fg,
+            TColor::Rgb(255, 0, 0),
+            "hidden marker must stay readable even at zero alpha"
+        );
+    }
+
+    #[test]
+    fn blend_color_endpoints_and_midpoint() {
+        let red = TColor::Rgb(255, 0, 0);
+        let black = TColor::Rgb(0, 0, 0);
+        assert_eq!(blend_color(red, black, 0.0), red);
+        assert_eq!(blend_color(red, black, 1.0), black);
+        assert_eq!(blend_color(red, black, 0.5), TColor::Rgb(128, 0, 0));
+        assert_eq!(
+            blend_color(red, TColor::Reset, 0.5),
+            red,
+            "non-RGB background passes the color through"
+        );
     }
 
     #[test]
